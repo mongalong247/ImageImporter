@@ -1,6 +1,14 @@
 # ImageImporter
  A lightweight image import utility built with Python and PyQt6, designed for photographers working with SD cards and digital cameras. This is a cross-platform tool aimed at making image ingesting cleaner, faster, and metadata-aware from day one.
 
+### 🧩 Problem Statement
+
+As a working photographer using vintage glass and manual lenses, my images lack embedded metadata for lens make, model, focal length, and aperture. Existing solutions treat metadata tagging as an afterthought — clunky add-ons to existing workflows, not built into the import process.
+
+I need a tool where **metadata management is a core part of ingest**, not an extra step later. This includes custom lens profiles, selective tagging, and backup-aware import — with an emphasis on **workflow reliability and business resilience** from day one.
+
+---
+
 ---
 
 ## ✅ Current Features
