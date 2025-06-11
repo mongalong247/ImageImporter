@@ -134,6 +134,14 @@ class ImageImporter(QWidget):
             display_path = self.truncate_path(folder)
             self.source_path_label.setText(display_path)
             self.source_path_label.setToolTip(folder)
+
+    def select_destination(self):  # ← THIS is what you need to add
+        folder = QFileDialog.getExistingDirectory(self, "Select Destination Folder")
+        if folder:
+            self.dest_folder = folder
+            display_path = self.truncate_path(folder)
+            self.dest_path_label.setText(display_path)
+            self.dest_path_label.setToolTip(folder)
         
     def truncate_path(self, path, max_len=50):
         return path if len(path) <= max_len else f"...{path[-(max_len - 3):]}"        
