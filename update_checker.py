@@ -2,17 +2,12 @@ import requests
 
 def check_exiftool_update(current_version):
     try:
-        url = "https://api.github.com/repos/exiftool/exiftool/releases/latest"
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            latest_version = data["tag_name"].lstrip("v")  # e.g., "12.70"
-            if latest_version != current_version:
-                print(f"[!] A new version of ExifTool is available: {latest_version}")
-                print("Visit https://github.com/exiftool/exiftool/releases to download the latest release.")
-            else:
-                print("[✓] ExifTool is up to date.")
+        response = requests.get("https://api.github.com/repos/exiftool/exiftool/releases/latest", timeout=5)
+        response.raise_for_status()
+        latest = response.json()["tag_name"].lstrip("v")
+        if latest != current_version:
+            print(f"[INFO] A new ExifTool version is available: {latest} (You have {current_version})")
         else:
-            print("[!] Failed to check for updates.")
-    except Exception as e:
-        print(f"[!] Error checking for ExifTool updates: {e}")
+            print("[INFO] ExifTool is up to date.")
+    except requests.RequestException:
+        print("[INFO] Could not check for ExifTool updates. Skipping.")
