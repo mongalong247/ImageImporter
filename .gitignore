@@ -1,0 +1,2 @@
+# Ignore ExifTool binary
+/resources/exiftool.exe
