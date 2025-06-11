@@ -23,18 +23,23 @@ class ImageImporter(QWidget):
         self.importLayout = QVBoxLayout()
         self.importForm.setLayout(self.importLayout)
 
-        # Folder selections
-        self.source_label = QLabel("Select source folder (e.g., SD card):")
-        self.source_button = QPushButton("Browse Source")
-        self.source_button.clicked.connect(self.select_source)
+        # Source folder selection
+        source_layout = QVBoxLayout()
+        source_button = QPushButton("Browse Source")
+        self.source_path_label = QLabel("No folder selected")
+        self.source_path_label.setStyleSheet("color: gray; font-style: italic")
+        source_layout.addWidget(source_button)
+        source_layout.addWidget(self.source_path_label)
+        source_button.clicked.connect(self.select_source)
 
-        self.dest_label = QLabel("Select destination folder:")
-        self.dest_button = QPushButton("Browse Destination")
-        self.dest_button.clicked.connect(self.select_destination)
-
-        self.backup_label = QLabel("Select backup folder (optional):")
-        self.backup_button = QPushButton("Browse Backup")
-        self.backup_button.clicked.connect(self.select_backup)
+        # Destination folder selection
+        dest_layout = QVBoxLayout()
+        dest_button = QPushButton("Browse Destination")
+        self.dest_path_label = QLabel("No folder selected")
+        self.dest_path_label.setStyleSheet("color: gray; font-style: italic")
+        dest_layout.addWidget(dest_button)
+        dest_layout.addWidget(self.dest_path_label)
+        dest_button.clicked.connect(self.select_destination)
 
         # Import structure
         self.structure_label = QLabel("Organize imports by:")
@@ -123,10 +128,15 @@ class ImageImporter(QWidget):
         self.backup_folder = ""
 
     def select_source(self):
-        self.source_folder = QFileDialog.getExistingDirectory(self, "Select Source Folder")
-
-    def select_destination(self):
-        self.dest_folder = QFileDialog.getExistingDirectory(self, "Select Destination Folder")
+        folder = QFileDialog.getExistingDirectory(self, "Select Source Folder")
+        if folder:
+            self.source_folder = folder
+            display_path = self.truncate_path(folder)
+            self.source_path_label.setText(display_path)
+            self.source_path_label.setToolTip(folder)
+        
+    def truncate_path(self, path, max_len=50):
+        return path if len(path) <= max_len else f"...{path[-(max_len - 3):]}"        
 
     def select_backup(self):
         self.backup_folder = QFileDialog.getExistingDirectory(self, "Select Backup Folder (Optional)")
