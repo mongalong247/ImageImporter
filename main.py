@@ -4,11 +4,9 @@ import os
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QLabel, QPushButton,
     QFileDialog, QComboBox, QHBoxLayout, QProgressBar, QCheckBox,
-    QLineEdit, QTextEdit, QGroupBox, QGridLayout, QSpacerItem,
-    QSizePolicy
+    QLineEdit, QTextEdit, QGroupBox, QGridLayout
 )
 from PyQt6.QtCore import Qt
-
 
 class ImageImporter(QWidget):
     def __init__(self):
@@ -24,22 +22,23 @@ class ImageImporter(QWidget):
         self.importForm.setLayout(self.importLayout)
 
         # Source folder selection
-        source_layout = QVBoxLayout()
-        source_button = QPushButton("Browse Source")
+        self.source_label = QLabel("Select source folder (e.g., SD card):")
+        self.source_button = QPushButton("Browse Source")
         self.source_path_label = QLabel("No folder selected")
         self.source_path_label.setStyleSheet("color: gray; font-style: italic")
-        source_layout.addWidget(source_button)
-        source_layout.addWidget(self.source_path_label)
-        source_button.clicked.connect(self.select_source)
+        self.source_button.clicked.connect(self.select_source)
 
         # Destination folder selection
-        dest_layout = QVBoxLayout()
-        dest_button = QPushButton("Browse Destination")
+        self.dest_label = QLabel("Select destination folder:")
+        self.dest_button = QPushButton("Browse Destination")
         self.dest_path_label = QLabel("No folder selected")
         self.dest_path_label.setStyleSheet("color: gray; font-style: italic")
-        dest_layout.addWidget(dest_button)
-        dest_layout.addWidget(self.dest_path_label)
-        dest_button.clicked.connect(self.select_destination)
+        self.dest_button.clicked.connect(self.select_destination)
+
+        # Backup folder selection
+        self.backup_label = QLabel("Select backup folder (optional):")
+        self.backup_button = QPushButton("Browse Backup")
+        self.backup_button.clicked.connect(self.select_backup)
 
         # Import structure
         self.structure_label = QLabel("Organize imports by:")
@@ -57,10 +56,13 @@ class ImageImporter(QWidget):
         self.import_button.clicked.connect(self.start_import)
         self.progress = QProgressBar()
 
+        # Add widgets to import layout
         self.importLayout.addWidget(self.source_label)
         self.importLayout.addWidget(self.source_button)
+        self.importLayout.addWidget(self.source_path_label)
         self.importLayout.addWidget(self.dest_label)
         self.importLayout.addWidget(self.dest_button)
+        self.importLayout.addWidget(self.dest_path_label)
         self.importLayout.addWidget(self.backup_label)
         self.importLayout.addWidget(self.backup_button)
         self.importLayout.addWidget(self.structure_label)
@@ -134,20 +136,22 @@ class ImageImporter(QWidget):
             display_path = self.truncate_path(folder)
             self.source_path_label.setText(display_path)
             self.source_path_label.setToolTip(folder)
+            
+    def truncate_path(self, path, max_len=50):
+        return path if len(path) <= max_len else f"...{path[-(max_len - 3):]}"
 
-    def select_destination(self):  # ← THIS is what you need to add
+    def select_destination(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Destination Folder")
         if folder:
             self.dest_folder = folder
             display_path = self.truncate_path(folder)
             self.dest_path_label.setText(display_path)
             self.dest_path_label.setToolTip(folder)
-        
-    def truncate_path(self, path, max_len=50):
-        return path if len(path) <= max_len else f"...{path[-(max_len - 3):]}"        
 
     def select_backup(self):
-        self.backup_folder = QFileDialog.getExistingDirectory(self, "Select Backup Folder (Optional)")
+        folder = QFileDialog.getExistingDirectory(self, "Select Backup Folder (Optional)")
+        if folder:
+            self.backup_folder = folder
 
     def toggle_metadata_panel(self, text):
         self.metadata_panel.setVisible(text == "Yes")
@@ -190,7 +194,6 @@ class ImageImporter(QWidget):
         from datetime import datetime
         dt = datetime.fromtimestamp(timestamp)
         return dt.strftime("%Y-%m-%d")
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
