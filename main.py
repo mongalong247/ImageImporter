@@ -6,7 +6,56 @@ from PyQt6.QtWidgets import (
     QFileDialog, QComboBox, QHBoxLayout, QProgressBar, QCheckBox,
     QLineEdit, QTextEdit, QGroupBox, QGridLayout
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject
+
+class ImportWorker(QObject):
+    progress = pyqtSignal(int)
+    status = pyqtSignal(str)
+    finished = pyqtSignal()
+
+    def __init__(self, source_folder, dest_folder, backup_folder, organize_by):
+        super().__init__()
+        self.source_folder = source_folder
+        self.dest_folder = dest_folder
+        self.backup_folder = backup_folder
+        self.organize_by = organize_by
+
+    def run(self):
+        import time  # Optional, for testing delay
+        files = [f for f in os.listdir(self.source_folder) if os.path.isfile(os.path.join(self.source_folder, f))]
+        total = len(files)
+        if total == 0:
+            self.status.emit("No files to import.")
+            self.finished.emit()
+            return
+
+        for i, file in enumerate(files):
+            src = os.path.join(self.source_folder, file)
+
+            timestamp = os.path.getmtime(src) if self.organize_by == "Shot Date" else os.path.getctime(src)
+            date_str = self.format_date(timestamp)
+
+            dest_subfolder = os.path.join(self.dest_folder, date_str)
+            os.makedirs(dest_subfolder, exist_ok=True)
+            dest = os.path.join(dest_subfolder, file)
+            shutil.copy2(src, dest)
+
+            if self.backup_folder:
+                backup_subfolder = os.path.join(self.backup_folder, date_str)
+                os.makedirs(backup_subfolder, exist_ok=True)
+                shutil.copy2(src, os.path.join(backup_subfolder, file))
+
+            pct = int((i + 1) / total * 100)
+            self.progress.emit(pct)
+            self.status.emit(f"Imported {i+1}/{total}: {file}")
+            # time.sleep(0.1)  # Optional: simulate work
+
+        self.finished.emit()
+
+    def format_date(self, timestamp):
+        from datetime import datetime
+        return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
+
 
 class ImageImporter(QWidget):
     def __init__(self):
@@ -70,6 +119,9 @@ class ImageImporter(QWidget):
         self.importLayout.addWidget(self.metadata_label)
         self.importLayout.addWidget(self.metadata_dropdown)
         self.importLayout.addWidget(self.import_button)
+        self.status_label = QLabel("Idle")
+        self.status_label.setStyleSheet("color: #666;")
+        self.importLayout.addWidget(self.status_label)
         self.importLayout.addWidget(self.progress)
 
         self.layout.addWidget(self.importForm)
@@ -158,8 +210,34 @@ class ImageImporter(QWidget):
 
     def start_import(self):
         if not self.source_folder or not self.dest_folder:
-            print("Source and destination folders must be selected.")
+            self.status_label.setText("Error: Select both source and destination folders.")
             return
+
+        # Disable the button during import
+        self.import_button.setEnabled(False)
+        self.progress.setValue(0)
+        self.status_label.setText("Starting import...")
+
+        # Set up the worker and thread
+        self.worker = ImportWorker(
+            self.source_folder,
+            self.dest_folder,
+            self.backup_folder,
+            self.structure_dropdown.currentText()
+        )
+        self.thread = QThread()
+        self.worker.moveToThread(self.thread)
+
+        # Connect signals
+        self.thread.started.connect(self.worker.run)
+        self.worker.progress.connect(self.progress.setValue)
+        self.worker.status.connect(self.status_label.setText)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.finished.connect(lambda: self.import_button.setEnabled(True))
+
+        self.thread.start()
 
         files = [f for f in os.listdir(self.source_folder) if os.path.isfile(os.path.join(self.source_folder, f))]
         total = len(files)
