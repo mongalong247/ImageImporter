@@ -3,9 +3,8 @@ from PyQt6.QtWidgets import (
     QProgressBar, QCheckBox, QLineEdit, QTextEdit, QGroupBox, QGridLayout
 )
 from PyQt6.QtCore import QThread
-import os
-import shutil
 from import_worker import ImportWorker
+from utils import truncate_path
 
 class ImageImporter(QWidget):
     def __init__(self):
@@ -124,9 +123,6 @@ class ImageImporter(QWidget):
 
         self.metadata_panel.setVisible(False)
 
-    def truncate_path(self, path, max_len=50):
-        return path if len(path) <= max_len else f"...{path[-(max_len - 3):]}"
-
     def toggle_metadata_panel(self, text):
         self.metadata_panel.setVisible(text == "Yes")
 
@@ -134,7 +130,7 @@ class ImageImporter(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Select Source Folder")
         if folder:
             self.source_folder = folder
-            display_path = self.truncate_path(folder)
+            display_path = truncate_path(folder)
             self.source_path_label.setText(display_path)
             self.source_path_label.setToolTip(folder)
 
@@ -142,7 +138,7 @@ class ImageImporter(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Select Destination Folder")
         if folder:
             self.dest_folder = folder
-            display_path = self.truncate_path(folder)
+            display_path = truncate_path(folder)
             self.dest_path_label.setText(display_path)
             self.dest_path_label.setToolTip(folder)
 

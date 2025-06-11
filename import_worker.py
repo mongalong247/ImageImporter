@@ -1,7 +1,7 @@
 import os
 import shutil
-from datetime import datetime
 from PyQt6.QtCore import QObject, pyqtSignal
+from utils import format_date
 
 class ImportWorker(QObject):
     progress = pyqtSignal(int)
@@ -28,7 +28,7 @@ class ImportWorker(QObject):
 
             try:
                 timestamp = os.path.getmtime(src) if self.organize_by == "Shot Date" else os.path.getctime(src)
-                date_str = self._format_date(timestamp)
+                date_str = format_date(timestamp)
 
                 dest_subfolder = os.path.join(self.dest_folder, date_str)
                 os.makedirs(dest_subfolder, exist_ok=True)
@@ -47,6 +47,3 @@ class ImportWorker(QObject):
                 self.status.emit(f"Error importing {file}: {str(e)}")
 
         self.finished.emit()
-
-    def _format_date(self, timestamp):
-        return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
