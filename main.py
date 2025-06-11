@@ -1,144 +1,181 @@
 import sys
-import os
 import shutil
-from datetime import datetime
+import os
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QLabel, QPushButton,
-    QFileDialog, QComboBox, QProgressBar, QHBoxLayout
+    QFileDialog, QComboBox, QHBoxLayout, QProgressBar, QCheckBox,
+    QLineEdit, QTextEdit, QGroupBox, QGridLayout, QSpacerItem,
+    QSizePolicy
 )
+from PyQt6.QtCore import Qt
 
 
-class ImportWindow(QWidget):
+class ImageImporter(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Image Importer")
-        self.setGeometry(200, 200, 500, 350)
-        self.init_ui()
+        self.setWindowTitle("Image Import Tool")
+        self.setGeometry(100, 100, 900, 600)
 
-    def init_ui(self):
-        layout = QVBoxLayout()
+        self.layout = QHBoxLayout(self)
 
-        # Source folder
-        self.source_label = QLabel("Source Folder (Camera/SD Card):")
-        self.source_button = QPushButton("Choose Folder")
-        self.source_button.clicked.connect(self.choose_source_folder)
-        layout.addWidget(self.source_label)
-        layout.addWidget(self.source_button)
+        # LEFT PANEL — MAIN IMPORT FORM
+        self.importForm = QWidget()
+        self.importLayout = QVBoxLayout()
+        self.importForm.setLayout(self.importLayout)
 
-        # Primary folder
-        self.primary_label = QLabel("Primary Save Location:")
-        self.primary_button = QPushButton("Choose Folder")
-        self.primary_button.clicked.connect(self.choose_primary_folder)
-        layout.addWidget(self.primary_label)
-        layout.addWidget(self.primary_button)
+        # Folder selections
+        self.source_label = QLabel("Select source folder (e.g., SD card):")
+        self.source_button = QPushButton("Browse Source")
+        self.source_button.clicked.connect(self.select_source)
 
-        # Backup folder
-        self.backup_label = QLabel("Backup Save Location (Optional):")
-        self.backup_button = QPushButton("Choose Folder")
-        self.backup_button.clicked.connect(self.choose_backup_folder)
-        layout.addWidget(self.backup_label)
-        layout.addWidget(self.backup_button)
+        self.dest_label = QLabel("Select destination folder:")
+        self.dest_button = QPushButton("Browse Destination")
+        self.dest_button.clicked.connect(self.select_destination)
 
-        # Folder structure choice
-        self.structure_label = QLabel("Folder Structure:")
+        self.backup_label = QLabel("Select backup folder (optional):")
+        self.backup_button = QPushButton("Browse Backup")
+        self.backup_button.clicked.connect(self.select_backup)
+
+        # Import structure
+        self.structure_label = QLabel("Organize imports by:")
         self.structure_dropdown = QComboBox()
-        self.structure_dropdown.addItems(["By Import Date", "By Shot Date"])
-        layout.addWidget(self.structure_label)
-        layout.addWidget(self.structure_dropdown)
+        self.structure_dropdown.addItems(["Import Date", "Shot Date"])
 
-        # Screening question
+        # Metadata screening question
         self.metadata_label = QLabel("Add custom/advanced metadata?")
         self.metadata_dropdown = QComboBox()
         self.metadata_dropdown.addItems(["No", "Yes"])
-        layout.addWidget(self.metadata_label)
-        layout.addWidget(self.metadata_dropdown)
+        self.metadata_dropdown.currentTextChanged.connect(self.toggle_metadata_panel)
 
-        # Progress bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar)
-
-        # Import button
+        # Import button and progress
         self.import_button = QPushButton("Start Import")
         self.import_button.clicked.connect(self.start_import)
-        layout.addWidget(self.import_button)
+        self.progress = QProgressBar()
 
-        self.setLayout(layout)
+        self.importLayout.addWidget(self.source_label)
+        self.importLayout.addWidget(self.source_button)
+        self.importLayout.addWidget(self.dest_label)
+        self.importLayout.addWidget(self.dest_button)
+        self.importLayout.addWidget(self.backup_label)
+        self.importLayout.addWidget(self.backup_button)
+        self.importLayout.addWidget(self.structure_label)
+        self.importLayout.addWidget(self.structure_dropdown)
+        self.importLayout.addWidget(self.metadata_label)
+        self.importLayout.addWidget(self.metadata_dropdown)
+        self.importLayout.addWidget(self.import_button)
+        self.importLayout.addWidget(self.progress)
 
-    def choose_source_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Source Folder")
-        if folder:
-            self.source_label.setText(f"Source Folder: {folder}")
-            self.source_path = folder
+        self.layout.addWidget(self.importForm)
 
-    def choose_primary_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Primary Folder")
-        if folder:
-            self.primary_label.setText(f"Primary Save Location: {folder}")
-            self.primary_path = folder
+        # RIGHT PANEL — METADATA PANEL (Initially Hidden)
+        self.metadata_panel = QGroupBox("Metadata Entry")
+        self.metadata_layout = QGridLayout()
+        self.metadata_panel.setLayout(self.metadata_layout)
 
-    def choose_backup_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Backup Folder (Optional)")
-        if folder:
-            self.backup_label.setText(f"Backup Save Location: {folder}")
-            self.backup_path = folder
+        # Global fields
+        self.make_input = QLineEdit()
+        self.model_input = QLineEdit()
+        self.metadata_layout.addWidget(QLabel("Lens Make:"), 0, 0)
+        self.metadata_layout.addWidget(self.make_input, 0, 1)
+        self.metadata_layout.addWidget(QLabel("Lens Model:"), 1, 0)
+        self.metadata_layout.addWidget(self.model_input, 1, 1)
+
+        # Optional checkbox-controlled fields
+        self.focal_checkbox = QCheckBox("Add Focal Length")
+        self.focal_input = QLineEdit()
+        self.focal_input.setPlaceholderText("e.g., 85mm")
+        self.focal_input.setEnabled(False)
+
+        self.aperture_checkbox = QCheckBox("Add Aperture")
+        self.aperture_input = QLineEdit()
+        self.aperture_input.setPlaceholderText("e.g., 2.8")
+        self.aperture_input.setEnabled(False)
+
+        self.serial_checkbox = QCheckBox("Add Lens Serial")
+        self.serial_input = QLineEdit()
+        self.serial_input.setPlaceholderText("Optional")
+        self.serial_input.setEnabled(False)
+
+        self.notes_checkbox = QCheckBox("Add Notes")
+        self.notes_input = QTextEdit()
+        self.notes_input.setEnabled(False)
+
+        self.focal_checkbox.stateChanged.connect(lambda: self.focal_input.setEnabled(self.focal_checkbox.isChecked()))
+        self.aperture_checkbox.stateChanged.connect(lambda: self.aperture_input.setEnabled(self.aperture_checkbox.isChecked()))
+        self.serial_checkbox.stateChanged.connect(lambda: self.serial_input.setEnabled(self.serial_checkbox.isChecked()))
+        self.notes_checkbox.stateChanged.connect(lambda: self.notes_input.setEnabled(self.notes_checkbox.isChecked()))
+
+        self.metadata_layout.addWidget(self.focal_checkbox, 2, 0)
+        self.metadata_layout.addWidget(self.focal_input, 2, 1)
+        self.metadata_layout.addWidget(self.aperture_checkbox, 3, 0)
+        self.metadata_layout.addWidget(self.aperture_input, 3, 1)
+        self.metadata_layout.addWidget(self.serial_checkbox, 4, 0)
+        self.metadata_layout.addWidget(self.serial_input, 4, 1)
+        self.metadata_layout.addWidget(self.notes_checkbox, 5, 0)
+        self.metadata_layout.addWidget(self.notes_input, 5, 1, 2, 1)
+
+        self.metadata_panel.setVisible(False)
+        self.layout.addWidget(self.metadata_panel)
+
+        # Internal vars
+        self.source_folder = ""
+        self.dest_folder = ""
+        self.backup_folder = ""
+
+    def select_source(self):
+        self.source_folder = QFileDialog.getExistingDirectory(self, "Select Source Folder")
+
+    def select_destination(self):
+        self.dest_folder = QFileDialog.getExistingDirectory(self, "Select Destination Folder")
+
+    def select_backup(self):
+        self.backup_folder = QFileDialog.getExistingDirectory(self, "Select Backup Folder (Optional)")
+
+    def toggle_metadata_panel(self, text):
+        self.metadata_panel.setVisible(text == "Yes")
 
     def start_import(self):
-        if not hasattr(self, 'source_path') or not hasattr(self, 'primary_path'):
-            print("Missing source or primary path.")
+        if not self.source_folder or not self.dest_folder:
+            print("Source and destination folders must be selected.")
             return
 
-        import_now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        structure = self.structure_dropdown.currentText()
-
-        # Gather files
-        all_files = []
-        for root, dirs, files in os.walk(self.source_path):
-            for file in files:
-                if file.lower().endswith(('.jpg', '.jpeg', '.cr2', '.nef', '.arw', '.raf', '.dng', '.rw2')):
-                    all_files.append(os.path.join(root, file))
-
-        total_files = len(all_files)
-        if total_files == 0:
-            print("No supported image files found.")
+        files = [f for f in os.listdir(self.source_folder) if os.path.isfile(os.path.join(self.source_folder, f))]
+        total = len(files)
+        if total == 0:
+            print("No files to import.")
             return
 
-        self.progress_bar.setMaximum(total_files)
-        self.progress_bar.setValue(0)
+        self.progress.setValue(0)
+        for i, file in enumerate(files):
+            src = os.path.join(self.source_folder, file)
 
-        for idx, src_file in enumerate(all_files, start=1):
-            # Determine subfolder name
-            if structure == "By Import Date":
-                subfolder = import_now
+            if self.structure_dropdown.currentText() == "Shot Date":
+                timestamp = os.path.getmtime(src)
             else:
-                try:
-                    mtime = os.path.getmtime(src_file)
-                    shot_date = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
-                    subfolder = shot_date
-                except Exception:
-                    subfolder = "unknown_date"
+                timestamp = os.path.getctime(src)
 
-            # Copy to primary
-            dest_primary = os.path.join(self.primary_path, subfolder)
-            os.makedirs(dest_primary, exist_ok=True)
-            shutil.copy2(src_file, dest_primary)
+            date_str = self.format_date(timestamp)
+            dest_subfolder = os.path.join(self.dest_folder, date_str)
+            os.makedirs(dest_subfolder, exist_ok=True)
+            dest = os.path.join(dest_subfolder, file)
+            shutil.copy2(src, dest)
 
-            # Copy to backup if available
-            if hasattr(self, 'backup_path'):
-                dest_backup = os.path.join(self.backup_path, subfolder)
-                os.makedirs(dest_backup, exist_ok=True)
-                shutil.copy2(src_file, dest_backup)
+            if self.backup_folder:
+                backup_subfolder = os.path.join(self.backup_folder, date_str)
+                os.makedirs(backup_subfolder, exist_ok=True)
+                shutil.copy2(src, os.path.join(backup_subfolder, file))
 
-            # Update progress
-            percent = int((idx / total_files) * 100)
-            self.progress_bar.setValue(idx)
-            self.progress_bar.setFormat(f"{idx}/{total_files} files ({percent}%)")
+            pct = int((i + 1) / total * 100)
+            self.progress.setValue(pct)
 
-        print("Import completed.")
+    def format_date(self, timestamp):
+        from datetime import datetime
+        dt = datetime.fromtimestamp(timestamp)
+        return dt.strftime("%Y-%m-%d")
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = ImportWindow()
-    window.show()
+    importer = ImageImporter()
+    importer.show()
     sys.exit(app.exec())
