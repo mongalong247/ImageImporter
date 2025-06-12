@@ -10,20 +10,24 @@ def write_metadata(file_path, metadata: dict) -> bool:
     Write EXIF metadata to a file using exiftool.
     """
     if not os.path.exists(file_path):
+        print(f"[Error] File not found: {file_path}")
         return False
 
-    args = [EXIFTOOL_PATH]
+    args = [EXIFTOOL_PATH, "-overwrite_original"]
     for tag, value in metadata.items():
-        if value:
+        if value:  # Only add if there's a value
             args.append(f"-{tag}={value}")
     args.append(file_path)
 
     try:
-        subprocess.run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        result = subprocess.run(args, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"[ExifTool Error] {result.stderr.strip()}")
+            return False
         return True
-    except subprocess.CalledProcessError:
+    except Exception as e:
+        print(f"[Exception] Failed to write metadata: {e}")
         return False
-
 
 def get_shot_date(file_path):
     """
