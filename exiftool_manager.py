@@ -17,7 +17,7 @@ def get_installed_version():
         return None
     try:
         output = os.popen(f'"{EXIFTOOL_EXE}" -ver').read().strip()
-        return output if output else None
+        return output.strip() if output else None
     except Exception:
         return None
 
@@ -42,16 +42,34 @@ def download_and_extract_exiftool(version):
 
         # Locate and move binary to RESOURCES_DIR
         binary_name = "exiftool.exe" if platform.system() == "Windows" else "exiftool"
+        binary_moved = False
+
         for root, dirs, files in os.walk(extract_path):
             for file in files:
                 if file.lower().startswith("exiftool") and file.lower().endswith(".exe" if platform.system() == "Windows" else ""):
                     source_path = os.path.join(root, file)
                     shutil.move(source_path, EXIFTOOL_EXE)
+                    binary_moved = True
+                    break
+            if binary_moved:
+                break
+
+        # Move supporting 'exiftool_files' folder if it exists
+        for root, dirs, files in os.walk(extract_path):
+            for dir_name in dirs:
+                if dir_name == "exiftool_files":
+                    src = os.path.join(root, dir_name)
+                    dst = os.path.join(RESOURCES_DIR, dir_name)
+                    if os.path.exists(dst):
+                        shutil.rmtree(dst)
+                    shutil.move(src, dst)
                     break
 
         # Clean up
-        shutil.rmtree(extract_path)
-        os.remove(zip_path)
+        if os.path.exists(extract_path):
+            shutil.rmtree(extract_path)
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
 
         print(f"ExifTool v{version} installed successfully to {EXIFTOOL_EXE}")
         return True
@@ -66,12 +84,27 @@ def check_or_install_exiftool():
         return os.path.exists(EXIFTOOL_EXE)
 
     installed_version = get_installed_version()
+    
+    if installed_version is None:
+        print(f"Installing ExifTool v{latest_version}...")
+        return download_and_extract_exiftool(latest_version)
+
+    # Normalize versions just in case there are hidden characters
+    installed_version = installed_version.strip()
+    latest_version = latest_version.strip()
+
+    # Debug print to see exactly what strings are being compared
+    print(f"Installed version: {repr(installed_version)}")
+    print(f"Latest version: {repr(latest_version)}")
+
     if installed_version == latest_version:
         print(f"ExifTool v{installed_version} is up to date.")
         return True
-    elif installed_version:
-        print(f"Updating ExifTool from v{installed_version} to v{latest_version}...")
+    elif installed_version > latest_version:
+        print(f"Installed ExifTool version ({installed_version}) is newer than the latest version ({latest_version}).")
+        return True
     else:
-        print(f"Installing ExifTool v{latest_version}...")
+        print(f"Updating ExifTool from v{installed_version} to v{latest_version}...")
+        return download_and_extract_exiftool(latest_version)
 
-    return download_and_extract_exiftool(latest_version)
+check_or_install_exiftool()
