@@ -89,7 +89,7 @@ class ImageImporter(QWidget):
             self,
             "Select Files or Cancel to Choose a Folder",
             "",
-            "Images (*.jpg *.jpeg *.png *.cr2 *.nef *.arw *.dng)"
+            "Images (*.jpg *.jpeg *.png *.cr2 *.nef *.arw *.dng *.rw2)"
         )
         if choice:
             self.selected_files = choice
