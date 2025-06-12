@@ -18,14 +18,14 @@ I need a tool where **metadata management is a core part of ingest**, not an ext
 - Choose how images are organized: by import date or by shot date (file mtime).
 - Progress bar shows import status with live count and percentage.
 - Screening question for whether custom metadata will be applied — logic stub in place.
+- - Right-hand metadata panel that appears if "Yes" is selected for metadata tagging.
+  - Checkbox-controlled fields for focal length, aperture, and notes.
 
 ---
 
 ## 🧠 Coming Soon
 
-- Right-hand metadata panel that appears if "Yes" is selected for metadata tagging.
-  - Global lens presets (Make, Model, Serial).
-  - Checkbox-controlled fields for focal length, aperture, and notes.
+- Global lens presets (Make, Model, Serial).
 - EXIFTool integration via subprocess, with user-defined presets.
 - Persistent config files (to store preferred folders, lens data, etc.).
 - Log file for each import session.
