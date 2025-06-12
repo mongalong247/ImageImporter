@@ -2,8 +2,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 import os
 import shutil
 from datetime import datetime
-from exif_manager import get_exif_data, get_shot_date
-import exiftool
+from exif_manager import get_shot_date
 
 class ImportWorker(QObject):
     progress = pyqtSignal(int)
