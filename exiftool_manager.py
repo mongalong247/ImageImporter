@@ -4,10 +4,11 @@ import shutil
 import zipfile
 import urllib.request
 
+# Define paths
 RESOURCES_DIR = os.path.join(os.path.dirname(__file__), "resources")
-EXIFTOOL_DIR = os.path.join(RESOURCES_DIR, "exiftool")
-EXIFTOOL_EXE = os.path.join(EXIFTOOL_DIR, "exiftool.exe" if platform.system() == "Windows" else "exiftool")
-CONFIG_PATH = os.path.join(RESOURCES_DIR, "config.txt")
+EXIFTOOL_EXE = os.path.join(RESOURCES_DIR, "exiftool.exe" if platform.system() == "Windows" else "exiftool")
+
+# Version check URLs
 VER_TXT_URL = "https://exiftool.org/ver.txt"
 ZIP_URL_TEMPLATE = "https://exiftool.org/exiftool-{}_64.zip"
 
@@ -35,27 +36,24 @@ def download_and_extract_exiftool(version):
         print(f"Downloading ExifTool v{version}...")
         urllib.request.urlretrieve(zip_url, zip_path)
 
+        extract_path = os.path.join(RESOURCES_DIR, f"exiftool-{version}")
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            extract_path = os.path.join(RESOURCES_DIR, f"exiftool-{version}")
             zip_ref.extractall(extract_path)
 
-        # Locate .exe or binary and rename
+        # Locate and move binary to RESOURCES_DIR
         binary_name = "exiftool.exe" if platform.system() == "Windows" else "exiftool"
         for root, dirs, files in os.walk(extract_path):
             for file in files:
                 if file.lower().startswith("exiftool") and file.lower().endswith(".exe" if platform.system() == "Windows" else ""):
                     source_path = os.path.join(root, file)
-                    os.makedirs(EXIFTOOL_DIR, exist_ok=True)
                     shutil.move(source_path, EXIFTOOL_EXE)
                     break
 
+        # Clean up
         shutil.rmtree(extract_path)
         os.remove(zip_path)
 
-        with open(CONFIG_PATH, "w") as f:
-            f.write(f"exiftool_path={EXIFTOOL_EXE}")
-
-        print(f"ExifTool v{version} installed successfully.")
+        print(f"ExifTool v{version} installed successfully to {EXIFTOOL_EXE}")
         return True
     except Exception as e:
         print("Error installing ExifTool:", e)
