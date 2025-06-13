@@ -30,14 +30,14 @@ A cross-platform image ingestion tool built for photographers using vintage or m
 2. Create a virtual environment:
    ```bash
    python -m venv venv
-   venv\Scripts\activate  # or source venv/bin/activate (Mac/Linux)```
+   venv\Scripts\activate  # or source venv/bin/activate (Mac/Linux)
    
 3. Install dependencies:
-```bash
-   pip install -r requirements.txt```
-
+   bash
+   pip install -r requirements.txt
+   
 4.Run the application:
-```bash
+   bash
    python app.py```
 
 
