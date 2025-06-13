@@ -1,16 +1,24 @@
 import subprocess
 import os
 import json
+import logging
 from datetime import datetime
 
-EXIFTOOL_PATH = os.path.join("resources", "exiftool.exe")  # Adjust for Mac/Linux if needed
+# Setup logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='[%(levelname)s] %(message)s',
+)
+log = logging.getLogger(__name__)
+
+EXIFTOOL_PATH = r"C:\\Users\\ianwa\\Documents\\ImageImporter\\resources\\exiftool.exe"  # Replace with the full path to the ExifTool executable
 
 def write_metadata(file_path, metadata: dict) -> bool:
     """
     Write EXIF metadata to a file using exiftool.
     """
     if not os.path.exists(file_path):
-        print(f"[Error] File not found: {file_path}")
+        log.error(f"File not found: {file_path}")
         return False
 
     args = [EXIFTOOL_PATH, "-overwrite_original"]
@@ -19,39 +27,18 @@ def write_metadata(file_path, metadata: dict) -> bool:
             args.append(f"-{tag}={value}")
     args.append(file_path)
 
+    log.debug(f"Running command: {' '.join(args)}")
+
     try:
-        result = subprocess.run(args, capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"[ExifTool Error] {result.stderr.strip()}")
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output, error = process.communicate()
+        if process.returncode!= 0:
+            log.error(f"ExifTool error:\n{error.decode('utf-8')}")
             return False
+
+        log.info(f"Metadata written successfully to: {file_path}")
         return True
+
     except Exception as e:
-        print(f"[Exception] Failed to write metadata: {e}")
+        log.exception(f"Exception during metadata write: {e}")
         return False
-
-def get_shot_date(file_path):
-    """
-    Extracts the shot date from EXIF metadata using exiftool.
-    Tries DateTimeOriginal, then CreateDate. Returns datetime object or None.
-    """
-    if not os.path.exists(file_path):
-        return None
-
-    try:
-        result = subprocess.run(
-            [EXIFTOOL_PATH, "-j", "-DateTimeOriginal", "-CreateDate", file_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-
-        metadata = json.loads(result.stdout)[0]
-        date_str = metadata.get("DateTimeOriginal") or metadata.get("CreateDate")
-
-        if date_str:
-            # ExifTool returns format: "YYYY:MM:DD HH:MM:SS"
-            return datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S")
-    except Exception as e:
-        print(f"[Exif Error] {file_path}: {e}")
-
-    return None
