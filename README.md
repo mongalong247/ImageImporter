@@ -34,11 +34,11 @@ A cross-platform image ingestion tool built for photographers using vintage or m
    
 3. Install dependencies:
 ```bash
-pip install -r requirements.txt```
+   pip install -r requirements.txt```
 
 4.Run the application:
 ```bash
-python app.py```
+   python app.py```
 
 
 🚧 Roadmap
