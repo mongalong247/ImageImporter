@@ -4,6 +4,7 @@ import platform
 import shutil
 import zipfile
 import urllib.request
+import urllib.error
 import subprocess
 import json
 from datetime import datetime
@@ -52,21 +53,51 @@ def get_latest_exiftool_version():
 
 def download_and_extract_exiftool(version):
     """
-    Downloads and extracts the ExifTool executable, combining robust search
-    with efficient direct-from-zip extraction.
+    Downloads and extracts the ExifTool executable. It tries multiple URL formats
+    to be resilient to changes in the ExifTool distribution naming scheme.
     """
-    zip_url = f"https://exiftool.org/exiftool-{version}.zip"
-    zip_path = os.path.join(RESOURCES_DIR, "exiftool.zip")
-    
-    print(f"Downloading ExifTool v{version} from {zip_url}...")
-    try:
-        urllib.request.urlretrieve(zip_url, zip_path)
+    # Define potential URL formats. The _64 version might have been used in the past.
+    # The version without _64 appears to be the current standard for the main zip.
+    url_templates = [
+        "https://exiftool.org/exiftool-{}_64.zip", # Try older/specific format first
+        "https://exiftool.org/exiftool-{}.zip"      # Fallback to current standard format
+    ]
 
+    zip_path = os.path.join(RESOURCES_DIR, "exiftool.zip")
+    download_success = False
+
+    for template in url_templates:
+        zip_url = template.format(version)
+        print(f"Attempting to download ExifTool v{version} from {zip_url}...")
+        try:
+            urllib.request.urlretrieve(zip_url, zip_path)
+            print(f"Successfully downloaded from {zip_url}.")
+            download_success = True
+            break # Exit loop on successful download
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                print(f"URL not found (404): {zip_url}. Trying next format.")
+                continue # Try the next URL
+            else:
+                print(f"HTTP Error downloading from {zip_url}: {e}")
+                # A different HTTP error is more serious, so stop trying.
+                break
+        except Exception as e:
+            print(f"An unexpected error occurred during download: {e}")
+            # A non-HTTP error, so stop trying.
+            break
+
+    if not download_success:
+        print("Failed to download ExifTool from all available URLs.")
+        return False
+
+    try:
+        # --- Extraction Logic ---
         found_and_extracted_exe = False
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             # Search for the executable in the zip file using flexible matching.
             for member in zip_ref.namelist():
-                # This logic is from your original, more robust script.
+                # Flexible matching for 'exiftool.exe' or 'exiftool(-k).exe' etc.
                 if member.lower().startswith('exiftool') and member.lower().endswith('.exe'):
                     print(f"Found executable '{member}' in zip archive.")
                     # Extract the found file directly to its final destination.
@@ -75,24 +106,21 @@ def download_and_extract_exiftool(version):
                     found_and_extracted_exe = True
                     break # Exit after finding the first match
         
-        # Clean up the downloaded zip file.
-        os.remove(zip_path)
-
         if not found_and_extracted_exe:
-            print(f"Error: Could not find a suitable 'exiftool...exe' file in the downloaded archive from {zip_url}.")
+            print(f"Error: Could not find a suitable 'exiftool...exe' file in the downloaded archive.")
             return False
 
         print(f"ExifTool v{version} installed successfully to {EXIFTOOL_PATH}")
         return True
 
     except Exception as e:
-        print(f"Error during ExifTool installation: {e}")
-        # Clean up any failed download artifacts.
+        print(f"Error during ExifTool file extraction: {e}")
+        return False
+    finally:
+        # Clean up the downloaded zip file in all cases.
         if os.path.exists(zip_path):
             os.remove(zip_path)
-        if os.path.exists(EXIFTOOL_PATH):
-            os.remove(EXIFTOOL_PATH)
-        return False
+
 
 def check_or_install_exiftool():
     """
