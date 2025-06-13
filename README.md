@@ -1,43 +1,33 @@
 # ImageImporter
- A lightweight image import utility built with Python and PyQt6, designed for photographers working with SD cards and digital cameras. This is a cross-platform tool aimed at making image ingesting cleaner, faster, and metadata-aware from day one.
 
-### 🧩 Problem Statement
-
-As a working photographer using vintage glass and manual lenses, my images lack embedded metadata for lens make, model, focal length, and aperture. Existing solutions treat metadata tagging as an afterthought — clunky add-ons to existing workflows, not built into the import process.
-
-I need a tool where **metadata management is a core part of ingest**, not an extra step later. This includes custom lens profiles, selective tagging, and backup-aware import — with an emphasis on **workflow reliability and business resilience** from day one.
+A cross-platform image ingestion tool built for photographers using vintage or manual lenses, with baked-in metadata tagging, clean backups, and import automation.
 
 ---
 
----
+## ✅ Features (Current MVP)
 
-## ✅ Current Features
-
-- Detect and select source folder (camera/SD card).
-- Select destination folder(s), including an optional backup location.
-- Choose how images are organized: by import date or by shot date (file mtime).
-- Progress bar shows import status with live count and percentage.
-- Screening question for whether custom metadata will be applied — logic stub in place.
-- - Right-hand metadata panel that appears if "Yes" is selected for metadata tagging.
-  - Checkbox-controlled fields for focal length, aperture, and notes.
-
----
-
-## 🧠 Coming Soon
-
-- Global lens presets (Make, Model, Serial).
-- EXIFTool integration via subprocess, with user-defined presets.
-- Persistent config files (to store preferred folders, lens data, etc.).
-- Log file for each import session.
-- Dry run option / import preview before committing.
-- Drag-and-drop support (stretch goal).
+- Import from selected images or full SD card folder
+- Organize into folders by:
+  - Import Date
+  - Shot Date (via EXIF metadata)
+- PyQt-based graphical interface
+- Threaded import (prevents UI freezing)
+- Progress bar and import stats
+- Built-in **Metadata Tagging Panel**:
+  - Lens Make / Model
+  - Optional fields: Focal Length, Aperture, Serial Number, Notes
+- **ExifTool Integration (Windows)**:
+  - Automatically downloads latest version
+  - Verifies version on launch
+  - Includes required `perl5.dll` and support folder
+  - Metadata writing tested and functional
 
 ---
 
-## 🛠️ Requirements
+## 🛠 How to Use
 
-- Python 3.10+
-- PyQt6  
-  Install via:  
-  ```bash
-  pip install PyQt6
+1. Clone/download the repo
+2. Create a virtual environment:
+   ```bash
+   python -m venv venv
+   venv\Scripts\activate  # or source venv/bin/activate (Mac/Linux)
