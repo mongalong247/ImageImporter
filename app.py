@@ -17,7 +17,7 @@ from PyQt6.QtCore import QObject, pyqtSignal, QThread
 
 # Define the base directory for resources.
 # This makes the script runnable from anywhere.
-APP_DIR = os.path.dirname(__file__)
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 RESOURCES_DIR = os.path.join(APP_DIR, "resources")
 # Ensure the resources directory exists.
 os.makedirs(RESOURCES_DIR, exist_ok=True)
@@ -51,7 +51,10 @@ def get_latest_exiftool_version():
         return None
 
 def download_and_extract_exiftool(version):
-    """Downloads and extracts the ExifTool zip file for the given version."""
+    """
+    Downloads and extracts the ExifTool executable, combining robust search
+    with efficient direct-from-zip extraction.
+    """
     zip_url = f"https://exiftool.org/exiftool-{version}.zip"
     zip_path = os.path.join(RESOURCES_DIR, "exiftool.zip")
     
@@ -59,30 +62,32 @@ def download_and_extract_exiftool(version):
     try:
         urllib.request.urlretrieve(zip_url, zip_path)
 
-        found_exe = False
+        found_and_extracted_exe = False
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            # Extract the main executable, renaming it to the standard name.
+            # Search for the executable in the zip file using flexible matching.
             for member in zip_ref.namelist():
-                # The official name in the zip for the standalone Windows version.
-                if member.lower() == 'exiftool(-k).exe':
+                # This logic is from your original, more robust script.
+                if member.lower().startswith('exiftool') and member.lower().endswith('.exe'):
+                    print(f"Found executable '{member}' in zip archive.")
+                    # Extract the found file directly to its final destination.
                     with zip_ref.open(member) as source, open(EXIFTOOL_PATH, 'wb') as target:
                         shutil.copyfileobj(source, target)
-                    found_exe = True
-                    break
+                    found_and_extracted_exe = True
+                    break # Exit after finding the first match
         
         # Clean up the downloaded zip file.
         os.remove(zip_path)
 
-        if not found_exe:
-            print(f"Error: 'exiftool(-k).exe' not found in the downloaded zip file from {zip_url}.")
+        if not found_and_extracted_exe:
+            print(f"Error: Could not find a suitable 'exiftool...exe' file in the downloaded archive from {zip_url}.")
             return False
 
         print(f"ExifTool v{version} installed successfully to {EXIFTOOL_PATH}")
         return True
 
     except Exception as e:
-        print(f"Error installing ExifTool: {e}")
-        # Clean up failed download artifacts.
+        print(f"Error during ExifTool installation: {e}")
+        # Clean up any failed download artifacts.
         if os.path.exists(zip_path):
             os.remove(zip_path)
         if os.path.exists(EXIFTOOL_PATH):
@@ -371,13 +376,11 @@ class ImageImporter(QWidget):
         self.import_worker = None
 
         # Build the two main panels of the UI.
-        # FIX: Instantiate metadata_panel *before* building the form that refers to it.
         self.metadata_panel = MetadataPanel()
         self.build_import_form()
         
         self.layout.addWidget(self.import_form_group)
         self.layout.addWidget(self.metadata_panel)
-        # Hide the metadata panel by default until the user enables it.
         self.metadata_panel.setVisible(False)
 
     def build_import_form(self):
