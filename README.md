@@ -33,10 +33,12 @@ A cross-platform image ingestion tool built for photographers using vintage or m
    venv\Scripts\activate  # or source venv/bin/activate (Mac/Linux)```
    
 3. Install dependencies:
-```pip install -r requirements.txt```
+```bash
+pip install -r requirements.txt```
 
 4.Run the application:
-```python app.py```
+```bash
+python app.py```
 
 
 🚧 Roadmap
