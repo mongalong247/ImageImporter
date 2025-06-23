@@ -97,7 +97,6 @@ def _get_installed_version():
     if not os.path.exists(EXIFTOOL_PATH):
         return None
     try:
-        # Use a fully qualified path to avoid PATH issues.
         output = subprocess.check_output([EXIFTOOL_PATH, "-ver"], text=True).strip()
         return output
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -115,14 +114,13 @@ def _get_latest_version():
 
 def _download_and_extract_exiftool(version):
     """
-    Downloads and extracts ExifTool using your original, robust logic.
-    This includes creating a temporary extraction folder and moving the
-    necessary files into the resources directory.
+    Downloads and extracts ExifTool, correctly moving both the executable
+    and the necessary supporting files before cleanup.
     """
     zip_path = os.path.join(RESOURCES_DIR, "exiftool.zip")
     extract_path = os.path.join(RESOURCES_DIR, f"exiftool-temp-{version}")
     
-    # Use the URL template from your original script.
+    # Use the URL template from your original script for robustness.
     zip_url = f"https://exiftool.org/exiftool-{version}_64.zip"
     
     try:
@@ -133,7 +131,7 @@ def _download_and_extract_exiftool(version):
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(extract_path)
 
-        # Locate and move the main executable.
+        # 1. Locate and move the main executable.
         binary_moved = False
         for root, _, files in os.walk(extract_path):
             for file in files:
@@ -148,6 +146,21 @@ def _download_and_extract_exiftool(version):
         if not binary_moved:
             raise FileNotFoundError("Could not find exiftool.exe in the extracted files.")
 
+        # 2. FIX: Locate and move the supporting 'exiftool_files' directory.
+        support_dir_moved = False
+        for root, dirs, _ in os.walk(extract_path):
+            for dir_name in dirs:
+                if dir_name.lower() == "exiftool_files":
+                    src = os.path.join(root, dir_name)
+                    dst = os.path.join(RESOURCES_DIR, dir_name)
+                    if os.path.exists(dst): # Remove old support files before moving new ones
+                        shutil.rmtree(dst)
+                    shutil.move(src, dst)
+                    support_dir_moved = True
+                    break
+            if support_dir_moved:
+                break
+
         print(f"ExifTool v{version} installed successfully.")
         return True
 
@@ -155,7 +168,7 @@ def _download_and_extract_exiftool(version):
         print(f"Error during ExifTool installation: {e}")
         return False
     finally:
-        # Clean up temporary files and folders.
+        # 3. Clean up temporary files and folders after moving all necessary parts.
         if os.path.exists(extract_path):
             shutil.rmtree(extract_path)
         if os.path.exists(zip_path):
