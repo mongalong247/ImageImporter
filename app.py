@@ -9,55 +9,17 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QObject, pyqtSignal, QThread, QSettings
 
-# New: Import the dedicated manager for all ExifTool operations.
+# --- Modular Imports ---
+# Import the dedicated managers for ExifTool and the new Metadata Panel.
 import exiftool_manager
+from metadata_panel import MetadataManagerPanel
+
 
 # --- UTILITY FUNCTIONS ---
 
 def truncate_path(path: str, max_len: int = 60) -> str:
     """Truncates a long path for display."""
     return path if len(path) <= max_len else f"...{path[-(max_len - 3):]}"
-
-# --- GUI: METADATA PANEL ---
-
-class MetadataPanel(QGroupBox):
-    """A QGroupBox for entering custom metadata."""
-    def __init__(self):
-        super().__init__("Metadata to Apply")
-        # (Layout and widget definitions remain unchanged)
-        self.layout = QGridLayout(self)
-        self.make_input = QLineEdit()
-        self.model_input = QLineEdit()
-        self.focal_input = QLineEdit()
-        self.focal_input.setPlaceholderText("e.g., 85 or 85mm")
-        self.aperture_input = QLineEdit()
-        self.aperture_input.setPlaceholderText("e.g., 2.8 or f/2.8")
-        self.serial_input = QLineEdit()
-        self.serial_input.setPlaceholderText("Optional lens serial number")
-        self.notes_input = QTextEdit()
-        self.layout.addWidget(QLabel("Lens Make:"), 0, 0)
-        self.layout.addWidget(self.make_input, 0, 1)
-        self.layout.addWidget(QLabel("Lens Model:"), 1, 0)
-        self.layout.addWidget(self.model_input, 1, 1)
-        self.layout.addWidget(QLabel("Focal Length:"), 2, 0)
-        self.layout.addWidget(self.focal_input, 2, 1)
-        self.layout.addWidget(QLabel("Aperture (F-Number):"), 3, 0)
-        self.layout.addWidget(self.aperture_input, 3, 1)
-        self.layout.addWidget(QLabel("Lens Serial:"), 4, 0)
-        self.layout.addWidget(self.serial_input, 4, 1)
-        self.layout.addWidget(QLabel("Notes/Description:"), 5, 0)
-        self.layout.addWidget(self.notes_input, 5, 1, 2, 1)
-
-    def get_metadata(self) -> dict:
-        """Collects data from the input fields."""
-        return {
-            "LensMake": self.make_input.text().strip(),
-            "LensModel": self.model_input.text().strip(),
-            "FocalLength": self.focal_input.text().strip(),
-            "FNumber": self.aperture_input.text().strip(),
-            "LensSerialNumber": self.serial_input.text().strip(),
-            "ImageDescription": self.notes_input.toPlainText().strip()
-        }
 
 # --- BACKGROUND WORKER ---
 
@@ -99,7 +61,6 @@ class ImportWorker(QObject):
                     break
                 
                 if self.structure == "Shot Date":
-                    # Update: Call the modular function
                     shot_date = exiftool_manager.get_shot_date(file_path)
                     subfolder_name = shot_date.strftime(self.date_format) if shot_date else "unknown_date"
                 else:
@@ -119,7 +80,6 @@ class ImportWorker(QObject):
 
                 if self.metadata:
                     self.status.emit(f"Applying metadata to {filename}...")
-                    # Update: Call the modular function
                     if not exiftool_manager.write_metadata(dest_file_path, self.metadata):
                          self.status.emit(f"Warning: Metadata write failed for {filename}")
 
@@ -150,11 +110,17 @@ class ImageImporter(QWidget):
         self.import_thread = None
         self.import_worker = None
 
-        self.metadata_panel = MetadataPanel()
+        # Update: Instantiate the new modular metadata panel.
+        self.metadata_panel = MetadataManagerPanel()
+        
+        # Build the main import form.
         self.build_import_form()
         
+        # Add the two main widgets to the window layout.
         self.layout.addWidget(self.import_form_group)
         self.layout.addWidget(self.metadata_panel)
+        
+        # The metadata panel is initially hidden and controlled by a checkbox.
         self.metadata_panel.setVisible(False)
 
     def build_import_form(self):
@@ -195,6 +161,8 @@ class ImageImporter(QWidget):
         self.structure_label = QLabel("Organize subfolders by:")
         self.structure_dropdown = QComboBox()
         self.structure_dropdown.addItems(["Shot Date", "Import Date"])
+        
+        # This checkbox now controls the visibility of the entire metadata panel.
         self.metadata_toggle = QCheckBox("Apply custom metadata")
         self.metadata_toggle.toggled.connect(self.metadata_panel.setVisible)
 
@@ -211,6 +179,7 @@ class ImageImporter(QWidget):
         self.status_label = QLabel("Idle. Select source and destination to begin.")
         self.status_label.setWordWrap(True)
 
+        # Add all widgets to the import settings layout.
         self.import_layout.addWidget(source_group_label)
         self.import_layout.addLayout(source_button_layout)
         self.import_layout.addWidget(self.source_path_label)
@@ -268,7 +237,12 @@ class ImageImporter(QWidget):
             QMessageBox.warning(self, "Missing Information", "A source (files or a folder) and a primary destination must be selected.")
             return
         
-        file_count = len(self.selected_files) if self.selected_files else len([f for f in os.listdir(self.source_folder) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.cr2', '.nef', '.arw', '.dng', '.rw2'))])
+        try:
+            file_count = len(self.selected_files) if self.selected_files else len([f for f in os.listdir(self.source_folder) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.cr2', '.nef', '.arw', '.dng', '.rw2'))])
+        except FileNotFoundError:
+             QMessageBox.critical(self, "Error", f"Source folder not found: {self.source_folder}")
+             return
+
         if file_count == 0:
             QMessageBox.information(self, "No Files Found", "The selected source contains no compatible image files.")
             return
@@ -296,6 +270,9 @@ class ImageImporter(QWidget):
         user_format = self.date_format_combo.currentText()
         python_format = user_format.replace("YYYY", "%Y").replace("MM", "%m").replace("DD", "%d")
 
+        # Update: Call the correct method on the new modular panel.
+        current_metadata = self.metadata_panel.get_active_metadata() if self.metadata_toggle.isChecked() else {}
+
         self.import_worker = ImportWorker(
             source_folder=self.source_folder,
             source_files=self.selected_files,
@@ -303,7 +280,7 @@ class ImageImporter(QWidget):
             backup_folder=self.backup_folder,
             structure=self.structure_dropdown.currentText(),
             date_format=python_format,
-            metadata=self.metadata_panel.get_metadata() if self.metadata_toggle.isChecked() else {}
+            metadata=current_metadata
         )
         self.import_thread = QThread()
         self.import_worker.moveToThread(self.import_thread)
@@ -315,8 +292,9 @@ class ImageImporter(QWidget):
         
     def on_import_finished(self):
         """Cleans up the thread and shows the post-import buttons."""
-        self.import_thread.quit()
-        self.import_thread.wait()
+        if self.import_thread:
+            self.import_thread.quit()
+            self.import_thread.wait()
         self.import_thread = None
         self.import_worker = None
         
@@ -336,10 +314,9 @@ class ImageImporter(QWidget):
 # --- APPLICATION ENTRY POINT ---
 
 if __name__ == "__main__":
-    # Update: Call the modular function to check for ExifTool.
     if not exiftool_manager.check_or_install_exiftool():
         app = QApplication(sys.argv)
-        QMessageBox.critical(None, "Critical Error", "Could not install or find ExifTool. The application cannot continue.\n\nPlease check your internet connection or place 'exiftool.exe' in the 'resources' folder.")
+        QMessageBox.critical(None, "Critical Error", "Could not install or find ExifTool. The application cannot continue.\n\nPlease check your internet connection or place 'exiftool.exe' and 'exiftool_files' in the 'resources' folder.")
         sys.exit(1)
 
     app = QApplication(sys.argv)
