@@ -2,6 +2,8 @@ import sys
 import os
 import shutil
 import json
+import platform
+import subprocess
 from datetime import datetime
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QFileDialog, QComboBox, QHBoxLayout,
@@ -20,6 +22,15 @@ from metadata_panel import MetadataManagerPanel
 def truncate_path(path: str, max_len: int = 60) -> str:
     """Truncates a long path for display."""
     return path if len(path) <= max_len else f"...{path[-(max_len - 3):]}"
+
+def open_folder(path):
+    """Opens a folder in the default file explorer in a cross-platform way."""
+    if platform.system() == "Windows":
+        os.startfile(path)
+    elif platform.system() == "Darwin": # macOS
+        subprocess.run(["open", path])
+    else: # Linux
+        subprocess.run(["xdg-open", path])
 
 # --- BACKGROUND WORKER ---
 
@@ -110,18 +121,14 @@ class ImageImporter(QWidget):
         self.import_thread = None
         self.import_worker = None
 
-        # Update: Instantiate the new modular metadata panel.
         self.metadata_panel = MetadataManagerPanel()
-        
-        # Build the main import form.
         self.build_import_form()
         
-        # Add the two main widgets to the window layout.
         self.layout.addWidget(self.import_form_group)
         self.layout.addWidget(self.metadata_panel)
-        
-        # The metadata panel is initially hidden and controlled by a checkbox.
         self.metadata_panel.setVisible(False)
+        
+        self.load_settings()
 
     def build_import_form(self):
         self.import_form_group = QGroupBox("Import Settings")
@@ -155,16 +162,17 @@ class ImageImporter(QWidget):
         date_formats = ["YYYY-MM-DD", "YYYYMMDD", "YYYY-MM", "YYYY/MM-DD"]
         self.date_format_combo.addItems(date_formats)
         self.date_format_combo.setToolTip("Use YYYY, MM, DD to define folder names.\nExample: 'Photos/YYYY/MM' will be converted to Python's strftime format.")
-        saved_format = self.settings.value("dateFormat", "YYYY-MM-DD")
-        self.date_format_combo.setCurrentText(saved_format)
 
         self.structure_label = QLabel("Organize subfolders by:")
         self.structure_dropdown = QComboBox()
         self.structure_dropdown.addItems(["Shot Date", "Import Date"])
         
-        # This checkbox now controls the visibility of the entire metadata panel.
         self.metadata_toggle = QCheckBox("Apply custom metadata")
         self.metadata_toggle.toggled.connect(self.metadata_panel.setVisible)
+
+        # New: Checkbox for opening destination folder.
+        self.open_dest_checkbox = QCheckBox("Open destination folder after import")
+        self.open_dest_checkbox.setToolTip("If checked, the primary destination folder will open automatically when the import finishes.")
 
         self.import_button = QPushButton("Start Import")
         self.import_button.setStyleSheet("font-weight: bold; padding: 8px;")
@@ -196,6 +204,7 @@ class ImageImporter(QWidget):
         self.import_layout.addWidget(self.date_format_combo)
         self.import_layout.addSpacing(10)
         self.import_layout.addWidget(self.metadata_toggle)
+        self.import_layout.addWidget(self.open_dest_checkbox) # Add new checkbox to layout
         self.import_layout.addStretch()
         self.import_layout.addWidget(self.import_button)
         self.import_layout.addWidget(self.close_button)
@@ -270,7 +279,6 @@ class ImageImporter(QWidget):
         user_format = self.date_format_combo.currentText()
         python_format = user_format.replace("YYYY", "%Y").replace("MM", "%m").replace("DD", "%d")
 
-        # Update: Call the correct method on the new modular panel.
         current_metadata = self.metadata_panel.get_active_metadata() if self.metadata_toggle.isChecked() else {}
 
         self.import_worker = ImportWorker(
@@ -291,7 +299,7 @@ class ImageImporter(QWidget):
         self.import_thread.start()
         
     def on_import_finished(self):
-        """Cleans up the thread and shows the post-import buttons."""
+        """Cleans up thread and handles post-import actions."""
         if self.import_thread:
             self.import_thread.quit()
             self.import_thread.wait()
@@ -301,10 +309,31 @@ class ImageImporter(QWidget):
         self.close_button.setVisible(True)
         self.import_button.setVisible(True)
         self.status_label.setText("Import complete. Ready to close or start another import.")
+
+        # New: Open destination folder if the box is checked.
+        if self.open_dest_checkbox.isChecked():
+            if self.dest_folder and os.path.isdir(self.dest_folder):
+                try:
+                    open_folder(self.dest_folder)
+                except Exception as e:
+                    self.status_label.setText(f"Import complete, but failed to open folder: {e}")
         
+    def load_settings(self):
+        """Loads saved settings and applies them to the UI."""
+        saved_date_format = self.settings.value("dateFormat", "YYYY-MM-DD")
+        self.date_format_combo.setCurrentText(saved_date_format)
+        
+        open_dest_state = self.settings.value("openDestAfterImport", False, type=bool)
+        self.open_dest_checkbox.setChecked(open_dest_state)
+
+    def save_settings(self):
+        """Saves current settings to the config file."""
+        self.settings.setValue("dateFormat", self.date_format_combo.currentText())
+        self.settings.setValue("openDestAfterImport", self.open_dest_checkbox.isChecked())
+
     def closeEvent(self, event):
         """Saves settings and ensures the worker thread is stopped gracefully."""
-        self.settings.setValue("dateFormat", self.date_format_combo.currentText())
+        self.save_settings()
         if self.import_worker: self.import_worker.stop()
         if self.import_thread:
             self.import_thread.quit()
