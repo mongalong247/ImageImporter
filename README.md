@@ -1,69 +1,31 @@
 # ImageImporter
 
-A cross-platform image ingestion tool built for photographers using vintage or manual lenses, with baked-in metadata tagging, clean backups, and import automation.
+A one-click photo import tool for photographers that:
+- Organizes images by shot date or import date
+- Adds optional custom metadata (lens, focal length, notes)
+- Allows creation and loading of lens metadata presets
+- Automatically bundles and updates ExifTool
+- Works offline with a clean, beginner-friendly interface
 
----
+## Current Features
+- ✅ Import all images from selected folder
+- ✅ Organize into folders by import or shot date
+- ✅ Add metadata to EXIF via ExifTool
+- ✅ Create, load, and delete lens metadata presets
+- ✅ Automatically download and manage ExifTool on first run
+- ✅ Modern PyQt6-based GUI
+- ✅ Windows support
 
-## ✅ Features (Current MVP)
+## Coming Soon
+- ⏳ Select individual files (not just folders)
+- ⏳ Cross-platform Mac/Linux support
+- ⏳ Export/import of preset config
+- ⏳ Packaging via PyInstaller
 
-- Import from selected images or full SD card folder
-- Organize into folders by:
-  - Import Date
-  - Shot Date (via EXIF metadata)
-- PyQt-based graphical interface
-- Threaded import (prevents UI freezing)
-- Progress bar and import stats
-- Built-in **Metadata Tagging Panel**:
-  - Lens Make / Model
-  - Optional fields: Focal Length, Aperture, Serial Number, Notes
-- **ExifTool Integration (Windows)**:
-  - Automatically downloads latest version
-  - Verifies version on launch
-  - Includes required `perl5.dll` and support folder
-  - Metadata writing tested and functional
-
----
-
-## 🛠 How to Use
-
-1. Clone/download the repo
-2. Create a virtual environment:
-   ```bash
-   python -m venv venv
-   venv\Scripts\activate  # or source venv/bin/activate (Mac/Linux)
-   
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   
-4.Run the application:
-   ```bash
-   python app.py
-```
-
-🚧 Roadmap
-
-Add per-image metadata overrides
-
-Cross-platform ExifTool integration (macOS, Linux)
-
-Save/load metadata presets (lens setups)
-
-Export logs and error reports
-
-Final build packaging for distribution
-
-
-📝 Known Issues
-
-    None — metadata and ExifTool logic now functioning correctly on Windows.
-
-🎯 Next Steps
-
-    Modular cleanup & directory structure review
-
-    Add unit tests and formal logging
-
-    Prepare for cross-platform compatibility
-
-    Build a proper GUI toggle for dry run/test modes
+## Development Progress
+- App scaffolding/UI: 95%
+- ExifTool integration: 95%
+- Metadata writing: 100%
+- Presets system: 100%
+- Cross-platform support: 10%
+- Final packaging: 0%
