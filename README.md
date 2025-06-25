@@ -9,6 +9,7 @@ A one-click photo import tool for photographers that:
 
 ## Current Features
 - ✅ Import all images from selected folder
+- ✅ Select individual files (not just folders)
 - ✅ Organize into folders by import or shot date
 - ✅ Add metadata to EXIF via ExifTool
 - ✅ Create, load, and delete lens metadata presets
@@ -17,7 +18,6 @@ A one-click photo import tool for photographers that:
 - ✅ Windows support
 
 ## Coming Soon
-- ⏳ Select individual files (not just folders)
 - ⏳ Cross-platform Mac/Linux support
 - ⏳ Export/import of preset config
 - ⏳ Packaging via PyInstaller
