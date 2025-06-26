@@ -10,27 +10,33 @@ from datetime import datetime
 
 # --- PATHS & CONFIGURATION ---
 
-# Define paths relative to this file's location.
 RESOURCES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources")
-# Define the platform-specific executable name.
 EXIFTOOL_EXE_NAME = "exiftool.exe" if platform.system() == "Windows" else "exiftool"
-# Define the full, absolute path to the executable.
 EXIFTOOL_PATH = os.path.join(RESOURCES_DIR, EXIFTOOL_EXE_NAME)
+
+# --- New: State variable to prevent double-execution ---
+_exiftool_checked = False
 
 # --- PUBLIC FUNCTIONS ---
 
 def check_or_install_exiftool():
     """
-    Checks if ExifTool is installed and up-to-date. This is the main public
-    function to be called by the main application.
+    Checks if ExifTool is installed and up-to-date. A guard flag ensures
+    this logic only ever runs once per application launch.
     """
-    # Ensure the resources directory exists before we do anything.
+    global _exiftool_checked
+    # If the check has already been done, exit immediately.
+    if _exiftool_checked:
+        return True
+
     os.makedirs(RESOURCES_DIR, exist_ok=True)
     
     print("Checking for ExifTool...")
     latest_version = _get_latest_version()
     if not latest_version:
         print("Could not check for the latest ExifTool version. Will use the existing version if available.")
+        # Mark as checked and return the result
+        _exiftool_checked = True
         return os.path.exists(EXIFTOOL_PATH)
 
     installed_version = _get_installed_version()
@@ -38,12 +44,17 @@ def check_or_install_exiftool():
     print(f"Latest version available: {latest_version}")
     print(f"Installed version: {installed_version or 'Not found'}")
     
+    result = False
     if installed_version and installed_version >= latest_version:
         print(f"ExifTool v{installed_version} is up to date.")
-        return True
-    
-    print(f"Updating ExifTool from v{installed_version or 'N/A'} to v{latest_version}...")
-    return _download_and_extract_exiftool(latest_version)
+        result = True
+    else:
+        print(f"Updating ExifTool from v{installed_version or 'N/A'} to v{latest_version}...")
+        result = _download_and_extract_exiftool(latest_version)
+
+    # Set the flag to true after the first run, regardless of outcome.
+    _exiftool_checked = True
+    return result
 
 def write_metadata(file_path: str, metadata: dict) -> bool:
     """
@@ -59,7 +70,7 @@ def write_metadata(file_path: str, metadata: dict) -> bool:
             args.append(f"-{tag}={value}")
     
     if len(args) <= 2:
-        return True # Nothing to write, which is a success.
+        return True
 
     args.append(file_path)
 
@@ -114,52 +125,44 @@ def _get_latest_version():
 
 def _download_and_extract_exiftool(version):
     """
-    Downloads and extracts ExifTool, correctly moving both the executable
-    and the necessary supporting files before cleanup.
+    Downloads and extracts ExifTool, moving the executable and support files.
     """
     zip_path = os.path.join(RESOURCES_DIR, "exiftool.zip")
     extract_path = os.path.join(RESOURCES_DIR, f"exiftool-temp-{version}")
     
-    # Use the URL template from your original script for robustness.
     zip_url = f"https://exiftool.org/exiftool-{version}_64.zip"
     
     try:
         print(f"Downloading ExifTool v{version} from {zip_url}...")
         urllib.request.urlretrieve(zip_url, zip_path)
 
-        # Extract to a temporary folder.
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(extract_path)
 
-        # 1. Locate and move the main executable.
         binary_moved = False
         for root, _, files in os.walk(extract_path):
             for file in files:
                 if file.lower().startswith("exiftool") and file.lower().endswith(".exe"):
-                    source_path = os.path.join(root, file)
-                    shutil.move(source_path, EXIFTOOL_PATH)
+                    shutil.move(os.path.join(root, file), EXIFTOOL_PATH)
                     binary_moved = True
                     break
-            if binary_moved:
-                break
+            if binary_moved: break
         
         if not binary_moved:
             raise FileNotFoundError("Could not find exiftool.exe in the extracted files.")
 
-        # 2. FIX: Locate and move the supporting 'exiftool_files' directory.
         support_dir_moved = False
         for root, dirs, _ in os.walk(extract_path):
             for dir_name in dirs:
                 if dir_name.lower() == "exiftool_files":
                     src = os.path.join(root, dir_name)
                     dst = os.path.join(RESOURCES_DIR, dir_name)
-                    if os.path.exists(dst): # Remove old support files before moving new ones
+                    if os.path.exists(dst):
                         shutil.rmtree(dst)
                     shutil.move(src, dst)
                     support_dir_moved = True
                     break
-            if support_dir_moved:
-                break
+            if support_dir_moved: break
 
         print(f"ExifTool v{version} installed successfully.")
         return True
@@ -168,7 +171,6 @@ def _download_and_extract_exiftool(version):
         print(f"Error during ExifTool installation: {e}")
         return False
     finally:
-        # 3. Clean up temporary files and folders after moving all necessary parts.
         if os.path.exists(extract_path):
             shutil.rmtree(extract_path)
         if os.path.exists(zip_path):
