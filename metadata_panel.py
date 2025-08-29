@@ -27,9 +27,9 @@ class MetadataManagerPanel(QWidget):
         self.tab_widget = QTabWidget()
         main_layout.addWidget(self.tab_widget)
 
-        # --- Create Tabs ---
-        self._create_active_metadata_tab()
+        # --- Create Tabs (Presets tab is now first) ---
         self._create_presets_management_tab()
+        self._create_active_metadata_tab()
 
         # --- Final Setup ---
         self._load_presets_from_file() # Load presets and populate the UI
@@ -51,7 +51,7 @@ class MetadataManagerPanel(QWidget):
     # --- UI Creation Methods ---
 
     def _create_active_metadata_tab(self):
-        """Creates the first tab for manually entering the metadata to be applied."""
+        """Creates the second tab for manually entering the metadata to be applied."""
         self.active_metadata_tab = QWidget()
         layout = QGridLayout(self.active_metadata_tab)
         
@@ -88,17 +88,21 @@ class MetadataManagerPanel(QWidget):
         self.tab_widget.addTab(self.active_metadata_tab, "Active Metadata")
 
     def _create_presets_management_tab(self):
-        """Creates the second tab for loading, saving, and deleting presets."""
+        """Creates the first tab for loading, saving, and deleting presets."""
         self.presets_tab = QWidget()
         layout = QVBoxLayout(self.presets_tab)
         
         # --- Load/Delete Group ---
-        load_group = QGroupBox("Manage Saved Presets")
-        load_layout = QGridLayout(load_group)
+        load_group = QGroupBox("Load or Delete a Saved Preset")
+        load_layout = QVBoxLayout(load_group)
 
+        load_layout.addWidget(QLabel("Saved Presets:"))
         self.presets_combo = QComboBox()
         self.presets_combo.setToolTip("Select a saved lens preset.")
-        
+        load_layout.addWidget(self.presets_combo)
+
+        # Button layout for Load/Delete
+        load_button_layout = QHBoxLayout()
         self.load_button = QPushButton("Load to Active Tab")
         self.load_button.setToolTip("Copies the selected preset's data to the 'Active Metadata' tab.")
         self.load_button.clicked.connect(self._on_load_preset)
@@ -107,25 +111,29 @@ class MetadataManagerPanel(QWidget):
         self.delete_button.setToolTip("Permanently deletes the selected preset.")
         self.delete_button.clicked.connect(self._on_delete_preset)
 
-        load_layout.addWidget(QLabel("Saved Presets:"), 0, 0)
-        load_layout.addWidget(self.presets_combo, 0, 1)
-        load_layout.addWidget(self.load_button, 1, 1)
-        load_layout.addWidget(self.delete_button, 2, 1)
+        load_button_layout.addStretch(1) # Add stretch to push buttons to the right
+        load_button_layout.addWidget(self.delete_button)
+        load_button_layout.addWidget(self.load_button)
+        load_layout.addLayout(load_button_layout)
         
         # --- Save Group ---
-        save_group = QGroupBox("Save a New Preset")
-        save_layout = QGridLayout(save_group)
+        save_group = QGroupBox("Save a New Preset from Active Metadata")
+        save_layout = QVBoxLayout(save_group)
 
+        save_layout.addWidget(QLabel("New Preset Name:"))
         self.preset_name_input = QLineEdit()
         self.preset_name_input.setPlaceholderText("e.g., Canon 50mm f/1.8")
+        save_layout.addWidget(self.preset_name_input)
         
-        self.save_button = QPushButton("Save Active Metadata as New Preset")
+        self.save_button = QPushButton("Save Active Metadata")
         self.save_button.setToolTip("Saves the data from the 'Active Metadata' tab as a new preset.")
         self.save_button.clicked.connect(self._on_save_preset)
-
-        save_layout.addWidget(QLabel("New Preset Name:"), 0, 0)
-        save_layout.addWidget(self.preset_name_input, 0, 1)
-        save_layout.addWidget(self.save_button, 1, 1)
+        
+        # Button layout for Save
+        save_button_layout = QHBoxLayout()
+        save_button_layout.addStretch(1)
+        save_button_layout.addWidget(self.save_button)
+        save_layout.addLayout(save_button_layout)
         
         layout.addWidget(load_group)
         layout.addWidget(save_group)
@@ -182,8 +190,8 @@ class MetadataManagerPanel(QWidget):
             self.serial_input.setText(preset_data.get("LensSerialNumber", ""))
             self.notes_input.setPlainText(preset_data.get("ImageDescription", ""))
             
-            # Switch to the active tab to show the user the loaded data
-            self.tab_widget.setCurrentIndex(0)
+            # Switch to the active tab (now index 1) to show the loaded data
+            self.tab_widget.setCurrentIndex(1)
             QMessageBox.information(self, "Preset Loaded", f"'{preset_name}' has been loaded into the 'Active Metadata' tab.")
 
     def _on_save_preset(self):
