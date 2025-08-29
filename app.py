@@ -38,13 +38,25 @@ def truncate_path(path: str, max_len: int = 60) -> str:
     return path if len(path) <= max_len else f"...{path[-(max_len - 3):]}"
 
 def open_folder(path):
-    # ... (function is unchanged)
+    """Opens a folder in the default file explorer in a platform-agnostic way."""
+    command = []
     if platform.system() == "Windows":
-        os.startfile(path)
-    elif platform.system() == "Darwin":
-        subprocess.run(["open", path])
-    else:
-        subprocess.run(["xdg-open", path])
+        # Using 'explorer' is more reliable than os.startfile and allows us to control the subprocess.
+        command = ["explorer", os.path.normpath(path)]
+    elif platform.system() == "Darwin": # macOS
+        command = ["open", path]
+    else: # Linux and other UNIX-like systems
+        command = ["xdg-open", path]
+    
+    # --- Platform-specific configuration for subprocess to hide console window ---
+    subprocess_args = {}
+    if platform.system() == "Windows":
+        subprocess_args['creationflags'] = subprocess.CREATE_NO_WINDOW
+        
+    try:
+        subprocess.run(command, check=True, **subprocess_args)
+    except Exception as e:
+        print(f"Failed to open folder {path}: {e}")
 
 # --- BACKGROUND WORKER ---
 class ImportWorker(QObject):

@@ -14,6 +14,11 @@ RESOURCES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resour
 EXIFTOOL_EXE_NAME = "exiftool.exe" if platform.system() == "Windows" else "exiftool"
 EXIFTOOL_PATH = os.path.join(RESOURCES_DIR, EXIFTOOL_EXE_NAME)
 
+# --- Platform-specific configuration for subprocess to hide console window ---
+SUBPROCESS_ARGS = {}
+if platform.system() == "Windows":
+    SUBPROCESS_ARGS['creationflags'] = subprocess.CREATE_NO_WINDOW
+
 # --- New: State variable to prevent double-execution ---
 _exiftool_checked = False
 
@@ -75,7 +80,7 @@ def write_metadata(file_path: str, metadata: dict) -> bool:
     args.append(file_path)
 
     try:
-        result = subprocess.run(args, capture_output=True, text=True, check=False)
+        result = subprocess.run(args, capture_output=True, text=True, check=False, **SUBPROCESS_ARGS)
         if result.returncode != 0:
             print(f"[ExifTool Error] {result.stderr.strip()}")
             return False
@@ -92,7 +97,7 @@ def get_shot_date(file_path: str) -> datetime | None:
         return None
     try:
         cmd = [EXIFTOOL_PATH, "-j", "-DateTimeOriginal", "-CreateDate", file_path]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True, **SUBPROCESS_ARGS)
         metadata = json.loads(result.stdout)[0]
         date_str = metadata.get("DateTimeOriginal") or metadata.get("CreateDate")
         if date_str:
@@ -108,7 +113,7 @@ def _get_installed_version():
     if not os.path.exists(EXIFTOOL_PATH):
         return None
     try:
-        output = subprocess.check_output([EXIFTOOL_PATH, "-ver"], text=True).strip()
+        output = subprocess.check_output([EXIFTOOL_PATH, "-ver"], text=True, **SUBPROCESS_ARGS).strip()
         return output
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
