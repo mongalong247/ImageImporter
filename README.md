@@ -23,9 +23,9 @@ A one-click photo import tool for photographers that:
 - ⏳ Packaging via PyInstaller
 
 ## Development Progress
-- App scaffolding/UI: 95%
-- ExifTool integration: 95%
+- App scaffolding/UI: 100%
+- ExifTool integration: 100%
 - Metadata writing: 100%
 - Presets system: 100%
 - Cross-platform support: 10%
-- Final packaging: 0%
+- Final packaging: 100%
