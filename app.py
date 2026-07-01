@@ -21,6 +21,8 @@ from metadata_panel import MetadataManagerPanel
 APP_VERSION = "1.1.0"
 NORMAL_STYLE = "color: gray; font-style: italic;"
 ERROR_STYLE = "color: #d32f2f; font-weight: bold;"
+WARNING_STYLE = "color: #b26a00; font-weight: bold;"
+OK_STYLE = "color: #2e7d32;"
 
 # --- UTILITY FUNCTIONS ---
 
@@ -137,6 +139,7 @@ class ImageImporter(QMainWindow):
         self.backup_folder = ""
         self.import_thread = None
         self.import_worker = None
+        self.exiftool_available = False
         self.metadata_panel = MetadataManagerPanel()
         self.build_import_form()
         self._create_menu_bar()
@@ -144,6 +147,7 @@ class ImageImporter(QMainWindow):
         self.layout.addWidget(self.metadata_panel)
         self.metadata_panel.setVisible(False)
         self.load_settings()
+        self._refresh_exiftool_status()
 
     def build_import_form(self):
         # (This function is unchanged)
@@ -208,6 +212,10 @@ class ImageImporter(QMainWindow):
         self.import_layout.addWidget(self.date_format_combo)
         self.import_layout.addSpacing(10)
         self.import_layout.addWidget(self.metadata_toggle)
+        self.exiftool_status_label = QLabel("ExifTool: checking...")
+        self.exiftool_status_label.setWordWrap(True)
+        self.exiftool_status_label.setStyleSheet(NORMAL_STYLE)
+        self.import_layout.addWidget(self.exiftool_status_label)
         self.import_layout.addWidget(self.open_dest_checkbox)
         self.import_layout.addStretch()
         self.import_layout.addWidget(self.import_button)
@@ -216,8 +224,16 @@ class ImageImporter(QMainWindow):
         self.import_layout.addWidget(self.progress)
 
     def _create_menu_bar(self):
-        # (This function is unchanged)
         menu_bar = self.menuBar()
+
+        settings_menu = menu_bar.addMenu("&Settings")
+        exiftool_path_action = QAction("Set &ExifTool Path...", self)
+        exiftool_path_action.triggered.connect(self._on_set_exiftool_path)
+        settings_menu.addAction(exiftool_path_action)
+        clear_exiftool_path_action = QAction("&Clear Custom ExifTool Path", self)
+        clear_exiftool_path_action.triggered.connect(self._on_clear_exiftool_path)
+        settings_menu.addAction(clear_exiftool_path_action)
+
         help_menu = menu_bar.addMenu("&Help")
         about_action = QAction("&About", self)
         about_action.triggered.connect(self._show_about_dialog)
@@ -226,6 +242,36 @@ class ImageImporter(QMainWindow):
     def _show_about_dialog(self):
         # (This function is unchanged)
         QMessageBox.about(self, "About Photo Import & Tagger", f"<b>Photo Import & Tagger</b><p>Version: {APP_VERSION}</p><p>A utility for importing photos with reliable backups and powerful, preset-driven metadata tagging.</p><p>This tool helps photographers using manual lenses to embed critical EXIF data directly into their workflow.</p>")
+
+    # --- ExifTool status & configuration ---
+
+    def _on_set_exiftool_path(self):
+        """Lets the user point at an existing ExifTool install (system or bundled elsewhere)."""
+        exe_filter = "exiftool.exe (exiftool.exe)" if platform.system() == "Windows" else "exiftool (exiftool)"
+        path, _ = QFileDialog.getOpenFileName(self, "Select ExifTool Executable", "", exe_filter + ";;All Files (*)")
+        if not path:
+            return
+        exiftool_manager.set_custom_path(path)
+        self._refresh_exiftool_status()
+
+    def _on_clear_exiftool_path(self):
+        """Clears any custom ExifTool path, reverting to the auto-detect chain."""
+        exiftool_manager.set_custom_path("")
+        self._refresh_exiftool_status()
+        QMessageBox.information(self, "ExifTool Path Cleared",
+                                 "Custom path cleared. The app will auto-detect ExifTool again.")
+
+    def _refresh_exiftool_status(self):
+        """Re-runs ExifTool resolution and updates the status banner + dependent UI."""
+        success, message = exiftool_manager.ensure_exiftool_available()
+        self.exiftool_available = success
+        self.exiftool_status_label.setText(("ExifTool: " if success else "ExifTool unavailable: ") + message)
+        self.exiftool_status_label.setStyleSheet(OK_STYLE if success else WARNING_STYLE)
+        # Metadata tagging can't work without ExifTool -- reflect that in the toggle,
+        # but don't fight the user if they re-enable it after fixing the path.
+        self.metadata_toggle.setEnabled(success)
+        if not success:
+            self.metadata_toggle.setChecked(False)
 
     # ... (All other class methods like select_source_files, start_import, load_settings, etc. remain unchanged)
     def select_source_files(self):
@@ -355,9 +401,21 @@ class ImageImporter(QMainWindow):
 # --- APPLICATION ENTRY POINT ---
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    if not exiftool_manager.check_or_install_exiftool():
-        QMessageBox.critical(None, "Critical Error", "Could not install or find ExifTool. The application cannot continue.\n\nPlease check your internet connection or place 'exiftool.exe' and 'exiftool_files' in the 'resources' folder.")
-        sys.exit(1)
+
+    # ExifTool availability is no longer treated as fatal: the app launches
+    # either way, and ImageImporter._refresh_exiftool_status() (called from
+    # its __init__) reflects the real status in the UI and disables the
+    # metadata-tagging feature specifically if nothing usable was found.
+    # Importing photos without metadata tagging still works fine.
     importer = ImageImporter()
+    if not importer.exiftool_available:
+        QMessageBox.warning(
+            importer, "ExifTool Not Found",
+            "ExifTool could not be found or installed automatically, so metadata "
+            "tagging is disabled for this session.\n\n"
+            "Photo importing will still work normally. To enable tagging, install "
+            "ExifTool and either add it to your system PATH, or point the app at it "
+            "directly via Settings > Set ExifTool Path..."
+        )
     importer.show()
     sys.exit(app.exec())

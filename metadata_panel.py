@@ -7,10 +7,12 @@ from PyQt6.QtWidgets import (
     QTabWidget
 )
 
-# Define the path for the presets file, relative to this script's location.
-# This assumes it will live alongside the main app.py, which has a 'resources' subfolder.
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-RESOURCES_DIR = os.path.join(APP_DIR, "resources")
+import paths
+
+# Resolved centrally in paths.py so this always agrees with exiftool_manager
+# and app.py on where the persistent resources folder actually is, even in
+# a PyInstaller-frozen build.
+RESOURCES_DIR = paths.RESOURCES_DIR
 PRESETS_FILE_PATH = os.path.join(RESOURCES_DIR, "lens_presets.json")
 
 class MetadataManagerPanel(QWidget):
