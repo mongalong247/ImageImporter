@@ -4,7 +4,7 @@ import json
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QComboBox, QHBoxLayout,
     QLineEdit, QTextEdit, QGroupBox, QGridLayout, QApplication, QMessageBox,
-    QTabWidget
+    QTabWidget, QFileDialog
 )
 
 import paths
@@ -137,8 +137,28 @@ class MetadataManagerPanel(QWidget):
         save_button_layout.addWidget(self.save_button)
         save_layout.addLayout(save_button_layout)
         
+        # --- Import/Export Group ---
+        io_group = QGroupBox("Backup & Sharing")
+        io_layout = QVBoxLayout(io_group)
+        io_layout.addWidget(QLabel("Export all presets to a file, or import presets from one."))
+
+        io_button_layout = QHBoxLayout()
+        self.export_button = QPushButton("Export Presets...")
+        self.export_button.setToolTip("Save all current presets to a .json file you can back up or share.")
+        self.export_button.clicked.connect(self._on_export_presets)
+
+        self.import_button = QPushButton("Import Presets...")
+        self.import_button.setToolTip("Load presets from a previously exported .json file.")
+        self.import_button.clicked.connect(self._on_import_presets)
+
+        io_button_layout.addStretch(1)
+        io_button_layout.addWidget(self.import_button)
+        io_button_layout.addWidget(self.export_button)
+        io_layout.addLayout(io_button_layout)
+        
         layout.addWidget(load_group)
         layout.addWidget(save_group)
+        layout.addWidget(io_group)
         layout.addStretch() # Pushes groups to the top
         self.tab_widget.addTab(self.presets_tab, "Lens Presets")
 
@@ -232,6 +252,105 @@ class MetadataManagerPanel(QWidget):
                 self._save_presets_to_file()
                 self._update_presets_combo()
                 QMessageBox.information(self, "Preset Deleted", f"Preset '{preset_name}' has been deleted.")
+
+    def _on_export_presets(self):
+        """Exports all current presets to a user-chosen .json file."""
+        if not self.presets:
+            QMessageBox.information(self, "Nothing to Export", "There are no saved presets to export yet.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Presets", "lens_presets_export.json", "JSON Files (*.json)"
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".json"):
+            file_path += ".json"
+
+        try:
+            with open(file_path, 'w') as f:
+                json.dump(self.presets, f, indent=4)
+            QMessageBox.information(self, "Export Complete", f"Exported {len(self.presets)} preset(s) to:\n{file_path}")
+        except IOError as e:
+            QMessageBox.critical(self, "Export Failed", f"Could not write to that file:\n{e}")
+
+    @staticmethod
+    def _is_valid_presets_structure(data) -> bool:
+        """
+        Validates that imported data has the expected shape: a dict mapping
+        preset name (str) -> preset fields (dict). Rejects anything else so
+        a malformed or hand-edited file can't corrupt the preset store or
+        crash the panel later when it expects certain keys/types.
+        """
+        if not isinstance(data, dict):
+            return False
+        for name, preset_data in data.items():
+            if not isinstance(name, str) or not isinstance(preset_data, dict):
+                return False
+        return True
+
+    def _on_import_presets(self):
+        """Imports presets from a user-chosen .json file, with conflict handling."""
+        file_path, _ = QFileDialog.getOpenFileName(self, "Import Presets", "", "JSON Files (*.json)")
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'r') as f:
+                imported_data = json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            QMessageBox.critical(self, "Import Failed", f"Could not read that file as valid JSON:\n{e}")
+            return
+
+        if not self._is_valid_presets_structure(imported_data):
+            QMessageBox.critical(
+                self, "Import Failed",
+                "That file doesn't look like a valid presets export. Expected a JSON object "
+                "mapping preset names to preset fields."
+            )
+            return
+
+        if not imported_data:
+            QMessageBox.information(self, "Nothing to Import", "That file doesn't contain any presets.")
+            return
+
+        conflicts = sorted(set(imported_data.keys()) & set(self.presets.keys()))
+        overwrite_conflicts = True
+
+        if conflicts:
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Preset Conflicts")
+            msg_box.setText(
+                f"{len(conflicts)} preset(s) in this file have the same name as existing presets:\n\n"
+                + ", ".join(conflicts)
+                + "\n\nHow would you like to handle these?"
+            )
+            overwrite_btn = msg_box.addButton("Overwrite", QMessageBox.ButtonRole.AcceptRole)
+            skip_btn = msg_box.addButton("Skip Conflicts", QMessageBox.ButtonRole.ActionRole)
+            cancel_btn = msg_box.addButton("Cancel Import", QMessageBox.ButtonRole.RejectRole)
+            msg_box.exec()
+            clicked = msg_box.clickedButton()
+
+            if clicked == cancel_btn:
+                return
+            overwrite_conflicts = (clicked == overwrite_btn)
+
+        imported_count = 0
+        skipped_count = 0
+        for name, preset_data in imported_data.items():
+            if name in self.presets and not overwrite_conflicts:
+                skipped_count += 1
+                continue
+            self.presets[name] = preset_data
+            imported_count += 1
+
+        self._save_presets_to_file()
+        self._update_presets_combo()
+
+        summary = f"Imported {imported_count} preset(s)."
+        if skipped_count:
+            summary += f" Skipped {skipped_count} conflicting preset(s)."
+        QMessageBox.information(self, "Import Complete", summary)
 
 # --- Standalone Test ---
 # This allows you to run and test this widget by itself.

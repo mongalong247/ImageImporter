@@ -60,6 +60,21 @@ def set_custom_path(path: str):
     _exiftool_checked = False
 
 
+def _get_install_hint() -> str:
+    """Returns a platform-appropriate install instruction for ExifTool."""
+    system = platform.system()
+    if system == "Darwin":
+        return "Install it with Homebrew: brew install exiftool"
+    if system == "Linux":
+        return (
+            "Install it with your distro's package manager, e.g. "
+            "'sudo apt install libimage-exiftool-perl' (Debian/Ubuntu), "
+            "'sudo dnf install perl-Image-ExifTool' (Fedora), or "
+            "'sudo pacman -S perl-image-exiftool' (Arch)."
+        )
+    return "Please install ExifTool for your platform from https://exiftool.org."
+
+
 # --- PUBLIC: RESOLUTION ---
 
 def _is_valid_exiftool(path: str) -> bool:
@@ -142,11 +157,11 @@ def ensure_exiftool_available():
 
     if platform.system() != "Windows":
         _exiftool_checked = True
+        install_hint = _get_install_hint()
         return False, (
-            "ExifTool was not found. Automatic download is currently only "
-            "supported on Windows. Please install ExifTool for your platform "
-            "(e.g. 'brew install exiftool' on macOS) or set a custom path in "
-            "Settings > ExifTool Path."
+            f"ExifTool was not found. Automatic installation is currently only "
+            f"supported on Windows. {install_hint} Alternatively, set a custom "
+            f"path in Settings > Set ExifTool Path..."
         )
 
     latest_version = _get_latest_version()

@@ -24,6 +24,16 @@ ERROR_STYLE = "color: #d32f2f; font-weight: bold;"
 WARNING_STYLE = "color: #b26a00; font-weight: bold;"
 OK_STYLE = "color: #2e7d32;"
 
+# Single shared list of recognized image/RAW extensions, used everywhere a
+# file needs to be checked or filtered instead of three separately
+# duplicated (and inconsistent) lists.
+IMAGE_EXTENSIONS = (
+    '.jpg', '.jpeg', '.png', '.heic', '.heif', '.tif', '.tiff',
+    '.cr2', '.cr3', '.nef', '.arw', '.dng', '.rw2',
+    '.orf', '.raf', '.pef', '.srw', '.rwl', '.3fr', '.raw',
+)
+IMAGE_FILE_DIALOG_FILTER = "Images (" + " ".join(f"*{ext}" for ext in IMAGE_EXTENSIONS) + ")"
+
 # --- UTILITY FUNCTIONS ---
 
 def resource_path(relative_path):
@@ -62,11 +72,10 @@ def open_folder(path):
 
 # --- BACKGROUND WORKER ---
 class ImportWorker(QObject):
-    # (This class remains unchanged)
     progress = pyqtSignal(int)
     status = pyqtSignal(str)
     finished = pyqtSignal()
-    # ... (rest of the class is identical)
+
     def __init__(self, source_folder, source_files, dest_folder, backup_folder, structure, date_format, metadata):
         super().__init__()
         self.source_folder = source_folder
@@ -77,43 +86,104 @@ class ImportWorker(QObject):
         self.date_format = date_format
         self.metadata = metadata
         self.is_running = True
+
     def stop(self):
         self.is_running = False
+
+    @staticmethod
+    def _get_unique_dest_path(dest_path: str) -> str:
+        """
+        If dest_path doesn't exist, returns it unchanged. Otherwise returns a
+        sibling path with a numeric suffix (e.g. 'IMG_0001 (1).jpg') that
+        doesn't collide with anything already on disk. Never overwrites an
+        existing file silently.
+        """
+        if not os.path.exists(dest_path):
+            return dest_path
+        base, ext = os.path.splitext(dest_path)
+        counter = 1
+        while True:
+            candidate = f"{base} ({counter}){ext}"
+            if not os.path.exists(candidate):
+                return candidate
+            counter += 1
+
     def run(self):
         try:
-            image_paths = self.source_files or [os.path.join(self.source_folder, f) for f in os.listdir(self.source_folder) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.cr2', '.nef', '.arw', '.dng', '.rw2'))]
+            image_paths = self.source_files or [
+                os.path.join(self.source_folder, f)
+                for f in os.listdir(self.source_folder)
+                if f.lower().endswith(IMAGE_EXTENSIONS)
+            ]
             total_files = len(image_paths)
             if total_files == 0:
                 self.status.emit("No compatible image files found to import.")
                 self.finished.emit()
                 return
+
             self.status.emit(f"Starting import of {total_files} file(s)...")
+            succeeded = 0
+            failed = 0
+            renamed = 0
+
             for idx, file_path in enumerate(image_paths):
                 if not self.is_running:
                     self.status.emit("Import cancelled by user.")
                     break
-                if self.structure == "Shot Date":
-                    shot_date = exiftool_manager.get_shot_date(file_path)
-                    subfolder_name = shot_date.strftime(self.date_format) if shot_date else "unknown_date"
-                else:
-                    subfolder_name = datetime.now().strftime(self.date_format)
-                dest_path_with_subfolder = os.path.join(self.dest_folder, subfolder_name)
-                os.makedirs(dest_path_with_subfolder, exist_ok=True)
+
                 filename = os.path.basename(file_path)
-                dest_file_path = os.path.join(dest_path_with_subfolder, filename)
-                self.status.emit(f"Copying {filename}...")
-                shutil.copy2(file_path, dest_file_path)
-                if self.backup_folder:
-                    backup_path_with_subfolder = os.path.join(self.backup_folder, subfolder_name)
-                    os.makedirs(backup_path_with_subfolder, exist_ok=True)
-                    shutil.copy2(file_path, os.path.join(backup_path_with_subfolder, filename))
-                if self.metadata:
-                    self.status.emit(f"Applying metadata to {filename}...")
-                    if not exiftool_manager.write_metadata(dest_file_path, self.metadata):
-                         self.status.emit(f"Warning: Metadata write failed for {filename}")
+                try:
+                    if self.structure == "Shot Date":
+                        shot_date = exiftool_manager.get_shot_date(file_path)
+                        subfolder_name = shot_date.strftime(self.date_format) if shot_date else "unknown_date"
+                    else:
+                        subfolder_name = datetime.now().strftime(self.date_format)
+
+                    dest_path_with_subfolder = os.path.join(self.dest_folder, subfolder_name)
+                    os.makedirs(dest_path_with_subfolder, exist_ok=True)
+                    dest_file_path = os.path.join(dest_path_with_subfolder, filename)
+
+                    final_dest_path = self._get_unique_dest_path(dest_file_path)
+                    if final_dest_path != dest_file_path:
+                        renamed += 1
+                        self.status.emit(
+                            f"'{filename}' already exists at destination -- "
+                            f"saving as '{os.path.basename(final_dest_path)}' instead of overwriting."
+                        )
+
+                    self.status.emit(f"Copying {filename}...")
+                    shutil.copy2(file_path, final_dest_path)
+
+                    if self.backup_folder:
+                        backup_path_with_subfolder = os.path.join(self.backup_folder, subfolder_name)
+                        os.makedirs(backup_path_with_subfolder, exist_ok=True)
+                        backup_file_path = self._get_unique_dest_path(
+                            os.path.join(backup_path_with_subfolder, filename)
+                        )
+                        shutil.copy2(file_path, backup_file_path)
+
+                    if self.metadata:
+                        self.status.emit(f"Applying metadata to {filename}...")
+                        if not exiftool_manager.write_metadata(final_dest_path, self.metadata):
+                            self.status.emit(f"Warning: Metadata write failed for {filename}")
+
+                    succeeded += 1
+                except Exception as e:
+                    # A problem with one file (locked, corrupted, permissions,
+                    # disk full for that write, etc.) must not abort the rest
+                    # of the batch -- log it and keep going.
+                    failed += 1
+                    self.status.emit(f"Error importing '{filename}': {e} -- skipping and continuing.")
+
                 self.progress.emit(int((idx + 1) / total_files * 100))
+
             if self.is_running:
-                self.status.emit("Import complete.")
+                summary = f"Import complete. {succeeded} of {total_files} file(s) copied successfully."
+                if renamed:
+                    summary += f" {renamed} renamed to avoid overwriting existing files."
+                if failed:
+                    summary += f" {failed} failed -- see status messages above for details."
+                self.status.emit(summary)
         except Exception as e:
             self.status.emit(f"Import process failed: {e}")
         finally:
@@ -275,7 +345,7 @@ class ImageImporter(QMainWindow):
 
     # ... (All other class methods like select_source_files, start_import, load_settings, etc. remain unchanged)
     def select_source_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "Select Image Files", self.source_folder, "Images (*.jpg *.jpeg *.png *.cr2 *.nef *.arw *.dng *.rw2)")
+        files, _ = QFileDialog.getOpenFileNames(self, "Select Image Files", self.source_folder, IMAGE_FILE_DIALOG_FILTER)
         if files:
             self.selected_files = files
             self.source_folder = os.path.dirname(files[0])
@@ -317,7 +387,7 @@ class ImageImporter(QMainWindow):
     def start_import(self):
         if not self._validate_paths(): return
         try:
-            file_count = len(self.selected_files) if self.selected_files else len([f for f in os.listdir(self.source_folder) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.cr2', '.nef', '.arw', '.dng', '.rw2'))])
+            file_count = len(self.selected_files) if self.selected_files else len([f for f in os.listdir(self.source_folder) if f.lower().endswith(IMAGE_EXTENSIONS)])
         except FileNotFoundError:
              QMessageBox.critical(self, "Error", f"Source folder not found: {self.source_folder}")
              return
