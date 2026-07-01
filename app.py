@@ -86,6 +86,14 @@ class ImportWorker(QObject):
         self.date_format = date_format
         self.metadata = metadata
         self.is_running = True
+        self.log_lines = []   # full timestamped log of this run, for optional saving
+        self.had_issues = False  # True if any file failed or a warning occurred
+
+    def _log(self, message: str):
+        """Records a timestamped line to the in-memory log and updates the status label."""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log_lines.append(f"[{timestamp}] {message}")
+        self.status.emit(message)
 
     def stop(self):
         self.is_running = False
@@ -117,18 +125,18 @@ class ImportWorker(QObject):
             ]
             total_files = len(image_paths)
             if total_files == 0:
-                self.status.emit("No compatible image files found to import.")
+                self._log("No compatible image files found to import.")
                 self.finished.emit()
                 return
 
-            self.status.emit(f"Starting import of {total_files} file(s)...")
+            self._log(f"Starting import of {total_files} file(s)...")
             succeeded = 0
             failed = 0
             renamed = 0
 
             for idx, file_path in enumerate(image_paths):
                 if not self.is_running:
-                    self.status.emit("Import cancelled by user.")
+                    self._log("Import cancelled by user.")
                     break
 
                 filename = os.path.basename(file_path)
@@ -146,12 +154,12 @@ class ImportWorker(QObject):
                     final_dest_path = self._get_unique_dest_path(dest_file_path)
                     if final_dest_path != dest_file_path:
                         renamed += 1
-                        self.status.emit(
+                        self._log(
                             f"'{filename}' already exists at destination -- "
                             f"saving as '{os.path.basename(final_dest_path)}' instead of overwriting."
                         )
 
-                    self.status.emit(f"Copying {filename}...")
+                    self._log(f"Copying {filename}...")
                     shutil.copy2(file_path, final_dest_path)
 
                     if self.backup_folder:
@@ -163,9 +171,10 @@ class ImportWorker(QObject):
                         shutil.copy2(file_path, backup_file_path)
 
                     if self.metadata:
-                        self.status.emit(f"Applying metadata to {filename}...")
+                        self._log(f"Applying metadata to {filename}...")
                         if not exiftool_manager.write_metadata(final_dest_path, self.metadata):
-                            self.status.emit(f"Warning: Metadata write failed for {filename}")
+                            self.had_issues = True
+                            self._log(f"Warning: Metadata write failed for {filename}")
 
                     succeeded += 1
                 except Exception as e:
@@ -173,7 +182,8 @@ class ImportWorker(QObject):
                     # disk full for that write, etc.) must not abort the rest
                     # of the batch -- log it and keep going.
                     failed += 1
-                    self.status.emit(f"Error importing '{filename}': {e} -- skipping and continuing.")
+                    self.had_issues = True
+                    self._log(f"Error importing '{filename}': {e} -- skipping and continuing.")
 
                 self.progress.emit(int((idx + 1) / total_files * 100))
 
@@ -183,9 +193,10 @@ class ImportWorker(QObject):
                     summary += f" {renamed} renamed to avoid overwriting existing files."
                 if failed:
                     summary += f" {failed} failed -- see status messages above for details."
-                self.status.emit(summary)
+                self._log(summary)
         except Exception as e:
-            self.status.emit(f"Import process failed: {e}")
+            self.had_issues = True
+            self._log(f"Import process failed: {e}")
         finally:
             self.finished.emit()
 
@@ -420,6 +431,10 @@ class ImageImporter(QMainWindow):
         self.import_worker.finished.connect(self.on_import_finished)
         self.import_thread.start()
     def on_import_finished(self):
+        # Capture what we need from the worker before we let go of it below.
+        had_issues = bool(self.import_worker and self.import_worker.had_issues)
+        log_lines = list(self.import_worker.log_lines) if self.import_worker else []
+
         if self.import_thread:
             self.import_thread.quit()
             self.import_thread.wait()
@@ -434,6 +449,36 @@ class ImageImporter(QMainWindow):
                     open_folder(self.dest_folder)
                 except Exception as e:
                     self.status_label.setText(f"Import complete, but failed to open folder: {e}")
+        if had_issues:
+            self._offer_save_log(log_lines)
+
+    def _offer_save_log(self, log_lines):
+        """
+        Prompts the user after a run that hit at least one error or warning:
+        save the full log to a file they choose, or discard it entirely.
+        Nothing is written to disk unless they explicitly choose to save.
+        """
+        reply = QMessageBox.question(
+            self, "Import Completed With Errors",
+            "There was an error during the import. Would you like to save the log file?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return  # Purge: log_lines is simply discarded, nothing is written.
+
+        default_name = f"import_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Import Log", default_name, "Text Files (*.txt)")
+        if not file_path:
+            return  # User backed out of the save dialog -- log is still discarded.
+
+        try:
+            with open(file_path, 'w') as f:
+                f.write("\n".join(log_lines))
+            QMessageBox.information(self, "Log Saved", f"Log saved to:\n{file_path}")
+        except IOError as e:
+            QMessageBox.critical(self, "Save Failed", f"Could not save the log file:\n{e}")
+
     def load_settings(self):
         self.date_format_combo.setCurrentText(self.settings.value("dateFormat", "YYYY-MM-DD"))
         self.open_dest_checkbox.setChecked(self.settings.value("openDestAfterImport", False, type=bool))

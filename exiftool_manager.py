@@ -1,9 +1,6 @@
 import os
 import platform
 import shutil
-import zipfile
-import urllib.request
-import urllib.error
 import subprocess
 import json
 from datetime import datetime
@@ -22,6 +19,14 @@ BUNDLED_EXIFTOOL_PATH = os.path.join(RESOURCES_DIR, EXIFTOOL_EXE_NAME)
 # old constant name directly (e.g. error messages).
 EXIFTOOL_PATH = BUNDLED_EXIFTOOL_PATH
 
+# The version of ExifTool bundled in resources/ for this release. This is
+# informational only (shown in status messages) -- there is no runtime
+# download or update check. To ship a newer version: download the official
+# release zip from https://exiftool.org (mirrored via SourceForge), extract
+# it, and replace resources/exiftool.exe + resources/exiftool_files/ in the
+# project, then bump this constant to match.
+PINNED_BUNDLED_VERSION = "13.59"
+
 SETTINGS_ORG = "PhotoTagger"
 SETTINGS_APP = "ImageImporter"
 CUSTOM_PATH_KEY = "exiftoolCustomPath"
@@ -31,12 +36,11 @@ SUBPROCESS_ARGS = {}
 if platform.system() == "Windows":
     SUBPROCESS_ARGS['creationflags'] = subprocess.CREATE_NO_WINDOW
 
-NETWORK_TIMEOUT = 10  # seconds, for version-check and download requests
 SUBPROCESS_TIMEOUT = 15  # seconds, for calls to the exiftool binary itself
 
 # --- State ---
 _resolved_exiftool_path = None  # cached once a working path is found this session
-_exiftool_checked = False       # guards against repeating the full resolve/download flow
+_exiftool_checked = False       # guards against repeating the resolution flow
 
 
 # --- SETTINGS: CUSTOM PATH ---
@@ -64,15 +68,15 @@ def _get_install_hint() -> str:
     """Returns a platform-appropriate install instruction for ExifTool."""
     system = platform.system()
     if system == "Darwin":
-        return "Install it with Homebrew: brew install exiftool"
+        return "install it with Homebrew (brew install exiftool)"
     if system == "Linux":
         return (
-            "Install it with your distro's package manager, e.g. "
-            "'sudo apt install libimage-exiftool-perl' (Debian/Ubuntu), "
-            "'sudo dnf install perl-Image-ExifTool' (Fedora), or "
-            "'sudo pacman -S perl-image-exiftool' (Arch)."
+            "install it with your distro's package manager "
+            "(e.g. 'sudo apt install libimage-exiftool-perl' on Debian/Ubuntu, "
+            "'sudo dnf install perl-Image-ExifTool' on Fedora, or "
+            "'sudo pacman -S perl-image-exiftool' on Arch)"
         )
-    return "Please install ExifTool for your platform from https://exiftool.org."
+    return "install it from https://exiftool.org"
 
 
 # --- PUBLIC: RESOLUTION ---
@@ -92,11 +96,10 @@ def _is_valid_exiftool(path: str) -> bool:
 
 def resolve_exiftool_path():
     """
-    Resolves a working ExifTool executable using a fallback chain, without
-    attempting any download:
+    Resolves a working ExifTool executable using a fallback chain:
       1. User-configured custom path (Settings)
       2. A system-wide install found on PATH
-      3. The bundled copy in resources/
+      3. The bundled, pinned copy in resources/
 
     Returns the resolved path (str), or None if nothing usable was found.
     """
@@ -130,10 +133,14 @@ def get_active_exiftool_path():
 
 def ensure_exiftool_available():
     """
-    Makes a best effort to have a working ExifTool ready to use. Tries the
-    fallback chain first; only attempts a download if nothing was found.
+    Checks whether a working ExifTool is available via the fallback chain
+    (custom path / system PATH / bundled copy). There is no runtime
+    download -- the bundled copy is pinned and shipped with the app (see
+    PINNED_BUNDLED_VERSION above), which also removes the network
+    dependency and the fragile "download and extract a .zip" logic that
+    used to run on first launch.
 
-    This function NEVER raises and never decides the app should quit -- it
+    This function NEVER raises and never implies the app should quit -- it
     just reports what it found so the caller can degrade gracefully (e.g.
     disable metadata features) instead of treating a missing ExifTool as
     fatal.
@@ -142,48 +149,16 @@ def ensure_exiftool_available():
     """
     global _exiftool_checked
 
-    if _exiftool_checked:
-        path = resolve_exiftool_path()
-        return (path is not None), (f"Using ExifTool at: {path}" if path else "ExifTool not found.")
-
     path = resolve_exiftool_path()
+    _exiftool_checked = True
+
     if path:
-        _exiftool_checked = True
         return True, f"Using ExifTool at: {path}"
 
-    # Nothing found via custom path, system PATH, or bundled copy.
-    # Only Windows has an automated download path today (see note below).
-    os.makedirs(RESOURCES_DIR, exist_ok=True)
-
-    if platform.system() != "Windows":
-        _exiftool_checked = True
-        install_hint = _get_install_hint()
-        return False, (
-            f"ExifTool was not found. Automatic installation is currently only "
-            f"supported on Windows. {install_hint} Alternatively, set a custom "
-            f"path in Settings > Set ExifTool Path..."
-        )
-
-    latest_version = _get_latest_version()
-    if not latest_version:
-        _exiftool_checked = True
-        return False, (
-            "ExifTool was not found, and the latest version could not be "
-            "checked (are you online?). You can set a custom path to an "
-            "existing ExifTool install in Settings > ExifTool Path."
-        )
-
-    success = _download_and_extract_exiftool(latest_version)
-    _exiftool_checked = True
-    if success:
-        global _resolved_exiftool_path
-        _resolved_exiftool_path = BUNDLED_EXIFTOOL_PATH
-        return True, f"ExifTool v{latest_version} installed successfully."
-
     return False, (
-        f"Failed to download ExifTool v{latest_version} automatically. "
-        "You can set a custom path to an existing ExifTool install in "
-        "Settings > ExifTool Path."
+        "ExifTool was not found. The bundled copy may be missing from this "
+        f"build's resources/ folder, you can {_get_install_hint()}, or you "
+        "can set a custom path in Settings > Set ExifTool Path..."
     )
 
 
@@ -279,73 +254,3 @@ def _get_installed_version():
         return output
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return None
-
-
-def _get_latest_version():
-    """Fetches the latest ExifTool version number from the official website."""
-    url = "https://exiftool.org/ver.txt"
-    try:
-        with urllib.request.urlopen(url, timeout=NETWORK_TIMEOUT) as response:
-            return response.read().decode("utf-8").strip()
-    except Exception as e:
-        print(f"Error fetching latest ExifTool version: {e}")
-        return None
-
-
-def _download_and_extract_exiftool(version: str) -> bool:
-    """
-    Downloads and extracts ExifTool (Windows only), moving the executable
-    and support files into RESOURCES_DIR.
-    """
-    zip_path = os.path.join(RESOURCES_DIR, "exiftool.zip")
-    extract_path = os.path.join(RESOURCES_DIR, f"exiftool-temp-{version}")
-
-    zip_url = f"https://exiftool.org/exiftool-{version}_64.zip"
-
-    try:
-        print(f"Downloading ExifTool v{version} from {zip_url}...")
-        with urllib.request.urlopen(zip_url, timeout=NETWORK_TIMEOUT) as response:
-            with open(zip_path, "wb") as out_file:
-                shutil.copyfileobj(response, out_file)
-
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(extract_path)
-
-        binary_moved = False
-        for root, _, files in os.walk(extract_path):
-            for file in files:
-                if file.lower().startswith("exiftool") and file.lower().endswith(".exe"):
-                    shutil.move(os.path.join(root, file), BUNDLED_EXIFTOOL_PATH)
-                    binary_moved = True
-                    break
-            if binary_moved:
-                break
-
-        if not binary_moved:
-            raise FileNotFoundError("Could not find exiftool.exe in the extracted files.")
-
-        support_dir_moved = False
-        for root, dirs, _ in os.walk(extract_path):
-            for dir_name in dirs:
-                if dir_name.lower() == "exiftool_files":
-                    src = os.path.join(root, dir_name)
-                    dst = os.path.join(RESOURCES_DIR, dir_name)
-                    if os.path.exists(dst):
-                        shutil.rmtree(dst)
-                    shutil.move(src, dst)
-                    support_dir_moved = True
-                    break
-            if support_dir_moved:
-                break
-
-        print(f"ExifTool v{version} installed successfully.")
-        return True
-
-    except Exception as e:
-        print(f"Error during ExifTool installation: {e}")
-        return False
-    finally:
-        if os.path.exists(extract_path):
-            shutil.rmtree(extract_path)
-        if os.path.exists(zip_path):
-            os.remove(zip_path)
