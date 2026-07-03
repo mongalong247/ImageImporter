@@ -4,10 +4,13 @@ import json
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QComboBox, QHBoxLayout,
     QLineEdit, QTextEdit, QGroupBox, QGridLayout, QApplication, QMessageBox,
-    QTabWidget, QFileDialog
+    QTabWidget, QFileDialog, QDialog
 )
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import Qt
 
 import paths
+import qr_codes
 
 # Resolved centrally in paths.py so this always agrees with exiftool_manager
 # and app.py on where the persistent resources folder actually is, even in
@@ -113,6 +116,14 @@ class MetadataManagerPanel(QWidget):
         self.delete_button.setToolTip("Permanently deletes the selected preset.")
         self.delete_button.clicked.connect(self._on_delete_preset)
 
+        self.generate_qr_button = QPushButton("Generate QR Code...")
+        self.generate_qr_button.setToolTip(
+            "Creates a printable QR code for the selected preset -- scan it as your "
+            "first frame after changing lens or aperture."
+        )
+        self.generate_qr_button.clicked.connect(self._on_generate_qr)
+
+        load_button_layout.addWidget(self.generate_qr_button)
         load_button_layout.addStretch(1) # Add stretch to push buttons to the right
         load_button_layout.addWidget(self.delete_button)
         load_button_layout.addWidget(self.load_button)
@@ -253,6 +264,26 @@ class MetadataManagerPanel(QWidget):
                 self._update_presets_combo()
                 QMessageBox.information(self, "Preset Deleted", f"Preset '{preset_name}' has been deleted.")
 
+    def _on_generate_qr(self):
+        """Generates and previews a printable QR code for the selected saved preset."""
+        preset_name = self.presets_combo.currentText()
+        if not preset_name:
+            QMessageBox.warning(self, "No Preset Selected", "Please select a saved preset to generate a QR code for.")
+            return
+
+        preset_data = self.presets.get(preset_name)
+        if not preset_data:
+            return
+
+        try:
+            qr_image = qr_codes.generate_preset_qr(preset_name, preset_data)
+        except Exception as e:
+            QMessageBox.critical(self, "QR Generation Failed", f"Could not generate a QR code:\n{e}")
+            return
+
+        dialog = QRCodePreviewDialog(qr_image, preset_name, self)
+        dialog.exec()
+
     def _on_export_presets(self):
         """Exports all current presets to a user-chosen .json file."""
         if not self.presets:
@@ -351,6 +382,60 @@ class MetadataManagerPanel(QWidget):
         if skipped_count:
             summary += f" Skipped {skipped_count} conflicting preset(s)."
         QMessageBox.information(self, "Import Complete", summary)
+
+
+class QRCodePreviewDialog(QDialog):
+    """
+    Shows the generated QR code for a preset and lets the user save it as a
+    PNG to print. Kept intentionally simple for step 1 of the QR roadmap --
+    no batch/label-sheet printing yet, just one code at a time.
+    """
+    def __init__(self, qr_image, preset_name: str, parent=None):
+        super().__init__(parent)
+        self.qr_image = qr_image
+        self.preset_name = preset_name
+        self.setWindowTitle(f"QR Code - {preset_name}")
+
+        layout = QVBoxLayout(self)
+
+        preview_label = QLabel()
+        pixmap = QPixmap()
+        pixmap.loadFromData(qr_codes.qr_image_to_png_bytes(qr_image))
+        preview_label.setPixmap(pixmap)
+        preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(preview_label)
+
+        hint_label = QLabel(
+            "Print this and place it inside your lens cap, or in a notebook. "
+            "Scan it as your first frame after changing lens or aperture."
+        )
+        hint_label.setWordWrap(True)
+        hint_label.setStyleSheet("color: gray; font-style: italic;")
+        layout.addWidget(hint_label)
+
+        button_layout = QHBoxLayout()
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        save_button = QPushButton("Save As PNG...")
+        save_button.clicked.connect(self._on_save)
+        button_layout.addStretch(1)
+        button_layout.addWidget(close_button)
+        button_layout.addWidget(save_button)
+        layout.addLayout(button_layout)
+
+    def _on_save(self):
+        safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in self.preset_name).strip()
+        default_name = f"{safe_name or 'lens_preset'}_qr.png"
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save QR Code", default_name, "PNG Images (*.png)")
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".png"):
+            file_path += ".png"
+        try:
+            self.qr_image.save(file_path)
+            QMessageBox.information(self, "Saved", f"QR code saved to:\n{file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Save Failed", f"Could not save the QR code:\n{e}")
 
 # --- Standalone Test ---
 # This allows you to run and test this widget by itself.
