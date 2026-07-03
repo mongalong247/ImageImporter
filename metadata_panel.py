@@ -387,23 +387,42 @@ class MetadataManagerPanel(QWidget):
 class QRCodePreviewDialog(QDialog):
     """
     Shows the generated QR code for a preset and lets the user save it as a
-    PNG to print. Kept intentionally simple for step 1 of the QR roadmap --
-    no batch/label-sheet printing yet, just one code at a time.
+    PNG to print, or copy it to the clipboard. Kept intentionally simple for
+    step 1 of the QR roadmap -- no batch/label-sheet printing yet, just one
+    code at a time.
     """
+    # The on-screen preview is scaled to fit within this square; the
+    # full-resolution image (which can easily be 700px+ per side at this
+    # error-correction level) is kept separately for saving/copying so
+    # print quality isn't affected by the preview size.
+    PREVIEW_MAX_SIZE = 420
+
     def __init__(self, qr_image, preset_name: str, parent=None):
         super().__init__(parent)
         self.qr_image = qr_image
         self.preset_name = preset_name
         self.setWindowTitle(f"QR Code - {preset_name}")
+        self.setMinimumSize(360, 420)
+        self.setMaximumSize(1000, 1000)
+        self.resize(480, 560)
 
         layout = QVBoxLayout(self)
 
+        self._full_pixmap = QPixmap()
+        self._full_pixmap.loadFromData(qr_codes.qr_image_to_png_bytes(qr_image))
+
         preview_label = QLabel()
-        pixmap = QPixmap()
-        pixmap.loadFromData(qr_codes.qr_image_to_png_bytes(qr_image))
-        preview_label.setPixmap(pixmap)
+        preview_label.setPixmap(self._full_pixmap.scaled(
+            self.PREVIEW_MAX_SIZE, self.PREVIEW_MAX_SIZE,
+            Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+        ))
         preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(preview_label)
+
+        size_label = QLabel(f"Full resolution: {qr_image.width}\u00d7{qr_image.height}px")
+        size_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        size_label.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(size_label)
 
         hint_label = QLabel(
             "Print this and place it inside your lens cap, or in a notebook. "
@@ -412,16 +431,26 @@ class QRCodePreviewDialog(QDialog):
         hint_label.setWordWrap(True)
         hint_label.setStyleSheet("color: gray; font-style: italic;")
         layout.addWidget(hint_label)
+        layout.addStretch(1)
 
         button_layout = QHBoxLayout()
+        copy_button = QPushButton("Copy to Clipboard")
+        copy_button.clicked.connect(self._on_copy)
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.accept)
         save_button = QPushButton("Save As PNG...")
         save_button.clicked.connect(self._on_save)
+        button_layout.addWidget(copy_button)
         button_layout.addStretch(1)
         button_layout.addWidget(close_button)
         button_layout.addWidget(save_button)
         layout.addLayout(button_layout)
+
+    def _on_copy(self):
+        # Copies the full-resolution image, not the scaled-down preview,
+        # so pasting elsewhere doesn't lose print quality.
+        QApplication.clipboard().setPixmap(self._full_pixmap)
+        QMessageBox.information(self, "Copied", "QR code copied to clipboard (full resolution).")
 
     def _on_save(self):
         safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in self.preset_name).strip()
@@ -436,6 +465,7 @@ class QRCodePreviewDialog(QDialog):
             QMessageBox.information(self, "Saved", f"QR code saved to:\n{file_path}")
         except Exception as e:
             QMessageBox.critical(self, "Save Failed", f"Could not save the QR code:\n{e}")
+
 
 # --- Standalone Test ---
 # This allows you to run and test this widget by itself.
