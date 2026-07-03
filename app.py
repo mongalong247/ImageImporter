@@ -15,6 +15,7 @@ from PyQt6.QtCore import QObject, pyqtSignal, QThread, QSettings
 
 # --- Modular Imports ---
 import exiftool_manager
+import qr_scan
 from metadata_panel import MetadataManagerPanel
 
 # --- CONSTANTS ---
@@ -116,6 +117,49 @@ class ImportWorker(QObject):
                 return candidate
             counter += 1
 
+    def _build_preset_segments(self, ordered_paths):
+        """
+        Scans files -- already in chronological (capture-time) order -- for
+        lens-preset QR slate frames, and builds a per-file metadata map:
+        every file gets whichever QR preset was most recently seen before
+        it, or the base self.metadata (from the Active Metadata tab) if no
+        QR frame has appeared yet in the batch.
+
+        Only called when metadata tagging is enabled: QR scanning has a
+        real cost -- an OpenCV decode per file, plus an extra ExifTool call
+        for RAW files to pull their embedded preview -- that isn't worth
+        paying when nothing will be written anyway.
+
+        Returns (preset_map, slate_frame_paths) where preset_map maps
+        file_path -> metadata dict to apply, and slate_frame_paths lists
+        every file that was itself detected as a QR slate frame (not yet
+        acted on -- that's the "move slate frames" step, still to come).
+        """
+        preset_map = {}
+        slate_frame_paths = []
+        active_preset = self.metadata
+
+        for file_path in ordered_paths:
+            if not self.is_running:
+                break
+
+            filename = os.path.basename(file_path)
+            try:
+                decoded = qr_scan.scan_file_for_lens_preset(file_path)
+            except Exception as e:
+                decoded = None
+                self._log(f"Warning: QR scan failed for {filename}: {e}")
+
+            if decoded:
+                preset_name = decoded.get("name", "unnamed preset")
+                active_preset = {k: v for k, v in decoded.items() if k != "name"}
+                slate_frame_paths.append(file_path)
+                self._log(f"Detected lens-slate QR in {filename} -- switching to preset '{preset_name}'.")
+
+            preset_map[file_path] = active_preset
+
+        return preset_map, slate_frame_paths
+
     def run(self):
         try:
             image_paths = self.source_files or [
@@ -130,19 +174,42 @@ class ImportWorker(QObject):
                 return
 
             self._log(f"Starting import of {total_files} file(s)...")
+
+            # Computed once up front and reused both for chronological
+            # ordering/QR segmentation below and for shot-date subfolder
+            # naming in the main loop, instead of asking ExifTool for the
+            # same file's date twice.
+            shot_dates = {file_path: exiftool_manager.get_shot_date(file_path) for file_path in image_paths}
+
+            ordered_paths = image_paths
+            preset_map = {}
+            slate_frame_paths = []
+
+            if self.metadata:
+                # QR cut points only make sense in capture-time order, not
+                # filesystem/selection order, so re-sort chronologically.
+                # Files with no readable date sort last, in their original
+                # relative order.
+                original_index = {p: i for i, p in enumerate(image_paths)}
+                ordered_paths = sorted(
+                    image_paths,
+                    key=lambda p: (shot_dates[p] is None, shot_dates[p] or datetime.max, original_index[p])
+                )
+                preset_map, slate_frame_paths = self._build_preset_segments(ordered_paths)
+
             succeeded = 0
             failed = 0
             renamed = 0
 
-            for idx, file_path in enumerate(image_paths):
+            for idx, file_path in enumerate(ordered_paths):
                 if not self.is_running:
                     self._log("Import cancelled by user.")
                     break
 
                 filename = os.path.basename(file_path)
                 try:
+                    shot_date = shot_dates.get(file_path)
                     if self.structure == "Shot Date":
-                        shot_date = exiftool_manager.get_shot_date(file_path)
                         subfolder_name = shot_date.strftime(self.date_format) if shot_date else "unknown_date"
                     else:
                         subfolder_name = datetime.now().strftime(self.date_format)
@@ -171,8 +238,9 @@ class ImportWorker(QObject):
                         shutil.copy2(file_path, backup_file_path)
 
                     if self.metadata:
+                        active_metadata = preset_map.get(file_path, self.metadata)
                         self._log(f"Applying metadata to {filename}...")
-                        if not exiftool_manager.write_metadata(final_dest_path, self.metadata):
+                        if not exiftool_manager.write_metadata(final_dest_path, active_metadata):
                             self.had_issues = True
                             self._log(f"Warning: Metadata write failed for {filename}")
 
@@ -191,6 +259,8 @@ class ImportWorker(QObject):
                 summary = f"Import complete. {succeeded} of {total_files} file(s) copied successfully."
                 if renamed:
                     summary += f" {renamed} renamed to avoid overwriting existing files."
+                if slate_frame_paths:
+                    summary += f" {len(slate_frame_paths)} QR lens-slate frame(s) detected."
                 if failed:
                     summary += f" {failed} failed -- see status messages above for details."
                 self._log(summary)
