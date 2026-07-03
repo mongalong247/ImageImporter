@@ -240,6 +240,39 @@ def get_shot_date(file_path: str):
     return None
 
 
+def extract_preview_image_bytes(file_path: str):
+    """
+    Extracts an embedded preview/thumbnail image from a file using
+    ExifTool -- what a camera's own LCD uses for playback -- without doing
+    a full RAW decode. Most RAW formats carry one.
+
+    Tries -PreviewImage first (larger, usually near full-resolution), then
+    falls back to -ThumbnailImage (smaller, but more universally present)
+    if no preview is embedded.
+
+    Returns the raw image bytes (typically JPEG), or None if no embedded
+    preview/thumbnail was found, ExifTool is unavailable, or the file
+    doesn't exist.
+    """
+    exiftool_path = resolve_exiftool_path()
+    if not exiftool_path or not os.path.exists(file_path):
+        return None
+
+    for tag in ("-PreviewImage", "-ThumbnailImage"):
+        try:
+            result = subprocess.run(
+                [exiftool_path, "-b", tag, file_path],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=SUBPROCESS_TIMEOUT, **SUBPROCESS_ARGS
+            )
+            if result.returncode == 0 and result.stdout:
+                return result.stdout
+        except Exception as e:
+            print(f"[Exif Error] Could not extract {tag} from {os.path.basename(file_path)}: {e}")
+
+    return None
+
+
 # --- INTERNAL HELPER FUNCTIONS ---
 
 def _get_installed_version():
