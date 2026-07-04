@@ -55,7 +55,6 @@ def open_folder(path):
     """Opens a folder in the default file explorer in a platform-agnostic way."""
     command = []
     if platform.system() == "Windows":
-        # Using 'explorer' is more reliable than os.startfile and allows us to control the subprocess.
         command = ["explorer", os.path.normpath(path)]
     elif platform.system() == "Darwin": # macOS
         command = ["open", path]
@@ -68,7 +67,15 @@ def open_folder(path):
         subprocess_args['creationflags'] = subprocess.CREATE_NO_WINDOW
         
     try:
-        subprocess.run(command, check=True, **subprocess_args)
+        if platform.system() == "Windows":
+            # explorer.exe's exit code is notoriously unreliable -- it can
+            # return non-zero even after successfully opening the folder --
+            # so a non-zero result here isn't treated as a real failure.
+            # macOS's 'open' and Linux's 'xdg-open' have meaningful exit
+            # codes, so check=True still applies to those.
+            subprocess.run(command, **subprocess_args)
+        else:
+            subprocess.run(command, check=True, **subprocess_args)
     except Exception as e:
         print(f"Failed to open folder {path}: {e}")
 
