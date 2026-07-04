@@ -7,7 +7,8 @@ import subprocess
 from datetime import datetime
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QLabel, QPushButton, QFileDialog, QComboBox, QHBoxLayout,
-    QProgressBar, QCheckBox, QLineEdit, QTextEdit, QGroupBox, QGridLayout, QApplication, QMessageBox
+    QProgressBar, QCheckBox, QLineEdit, QTextEdit, QGroupBox, QGridLayout, QApplication, QMessageBox,
+    QDialog
 )
 # New: Import QIcon for setting the application icon
 from PyQt6.QtGui import QAction, QIcon
@@ -125,6 +126,12 @@ class ImportWorker(QObject):
         it, or the base self.metadata (from the Active Metadata tab) if no
         QR frame has appeared yet in the batch.
 
+        Logs the outcome of every file's QR check individually, split into
+        three distinct cases (no scannable frame available at all / a frame
+        was scanned but no QR found in it / a lens-preset QR was decoded)
+        so a failure can be pinned to a specific stage rather than just
+        showing up as "nothing got applied".
+
         Only called when metadata tagging is enabled: QR scanning has a
         real cost -- an OpenCV decode per file, plus an extra ExifTool call
         for RAW files to pull their embedded preview -- that isn't worth
@@ -144,17 +151,31 @@ class ImportWorker(QObject):
                 break
 
             filename = os.path.basename(file_path)
+
             try:
-                decoded = qr_scan.scan_file_for_lens_preset(file_path)
+                frame = qr_scan.get_scannable_frame(file_path)
+            except Exception as e:
+                frame = None
+                self._log(f"Warning: Could not extract a scannable image from {filename}: {e}")
+
+            if frame is None:
+                self._log(f"No scannable image available for {filename} (unsupported format or no embedded preview) -- treated as no QR.")
+                preset_map[file_path] = active_preset
+                continue
+
+            try:
+                decoded = qr_scan.decode_lens_preset_qr(frame)
             except Exception as e:
                 decoded = None
-                self._log(f"Warning: QR scan failed for {filename}: {e}")
+                self._log(f"Warning: QR decode failed for {filename}: {e}")
 
             if decoded:
                 preset_name = decoded.get("name", "unnamed preset")
                 active_preset = {k: v for k, v in decoded.items() if k != "name"}
                 slate_frame_paths.append(file_path)
                 self._log(f"Detected lens-slate QR in {filename} -- switching to preset '{preset_name}'.")
+            else:
+                self._log(f"No lens-slate QR found in {filename}.")
 
             preset_map[file_path] = active_preset
 
@@ -239,10 +260,18 @@ class ImportWorker(QObject):
 
                     if self.metadata:
                         active_metadata = preset_map.get(file_path, self.metadata)
-                        self._log(f"Applying metadata to {filename}...")
-                        if not exiftool_manager.write_metadata(final_dest_path, active_metadata):
+                        applied_fields = {k: v for k, v in active_metadata.items() if v}
+                        if not applied_fields:
                             self.had_issues = True
-                            self._log(f"Warning: Metadata write failed for {filename}")
+                            self._log(f"Warning: No metadata fields to write for {filename} -- the active preset is empty.")
+                        else:
+                            self._log(
+                                f"Applying metadata to {filename}: "
+                                + ", ".join(f"{k}={v}" for k, v in applied_fields.items())
+                            )
+                            if not exiftool_manager.write_metadata(final_dest_path, active_metadata):
+                                self.had_issues = True
+                                self._log(f"Warning: Metadata write failed for {filename}")
 
                     succeeded += 1
                 except Exception as e:
@@ -269,6 +298,54 @@ class ImportWorker(QObject):
             self._log(f"Import process failed: {e}")
         finally:
             self.finished.emit()
+
+class LogViewerDialog(QDialog):
+    """
+    Shows the full log from an import run in a scrollable, read-only text
+    box, with the option to save it. Available after every run (not just
+    ones with errors) so behavior can be inspected even when nothing threw
+    an exception -- e.g. confirming whether a QR slate frame was actually
+    detected, and exactly which metadata fields were applied to which file.
+    """
+    def __init__(self, log_lines, parent=None):
+        super().__init__(parent)
+        self.log_lines = log_lines
+        self.setWindowTitle("Import Log")
+        self.setMinimumSize(420, 360)
+        self.setMaximumSize(1000, 1000)
+        self.resize(700, 600)
+
+        layout = QVBoxLayout(self)
+
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        text_edit.setFontFamily("Courier New")
+        text_edit.setPlainText("\n".join(log_lines))
+        layout.addWidget(text_edit)
+
+        button_layout = QHBoxLayout()
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        save_button = QPushButton("Save As...")
+        save_button.clicked.connect(self._on_save)
+        button_layout.addStretch(1)
+        button_layout.addWidget(close_button)
+        button_layout.addWidget(save_button)
+        layout.addLayout(button_layout)
+
+    def _on_save(self):
+        default_name = f"import_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Import Log", default_name, "Text Files (*.txt)")
+        if not file_path:
+            return
+        try:
+            with open(file_path, 'w') as f:
+                f.write("\n".join(self.log_lines))
+            QMessageBox.information(self, "Saved", f"Log saved to:\n{file_path}")
+        except IOError as e:
+            QMessageBox.critical(self, "Save Failed", f"Could not save the log file:\n{e}")
+
 
 # --- GUI: MAIN WINDOW ---
 class ImageImporter(QMainWindow):
@@ -344,6 +421,10 @@ class ImageImporter(QMainWindow):
         self.close_button.setStyleSheet("padding: 8px;")
         self.close_button.clicked.connect(self.close)
         self.close_button.setVisible(False)
+        self.view_log_button = QPushButton("View Import Log...")
+        self.view_log_button.clicked.connect(self._on_view_log)
+        self.view_log_button.setVisible(False)
+        self.last_import_log = []
         self.progress = QProgressBar()
         self.status_label = QLabel("Idle. Select source and destination to begin.")
         self.status_label.setWordWrap(True)
@@ -370,6 +451,7 @@ class ImageImporter(QMainWindow):
         self.import_layout.addWidget(self.open_dest_checkbox)
         self.import_layout.addStretch()
         self.import_layout.addWidget(self.import_button)
+        self.import_layout.addWidget(self.view_log_button)
         self.import_layout.addWidget(self.close_button)
         self.import_layout.addWidget(self.status_label)
         self.import_layout.addWidget(self.progress)
@@ -504,6 +586,7 @@ class ImageImporter(QMainWindow):
         # Capture what we need from the worker before we let go of it below.
         had_issues = bool(self.import_worker and self.import_worker.had_issues)
         log_lines = list(self.import_worker.log_lines) if self.import_worker else []
+        self.last_import_log = log_lines  # kept for on-demand viewing, whether or not anything went wrong
 
         if self.import_thread:
             self.import_thread.quit()
@@ -512,6 +595,7 @@ class ImageImporter(QMainWindow):
         self.import_worker = None
         self.close_button.setVisible(True)
         self.import_button.setVisible(True)
+        self.view_log_button.setVisible(True)
         self.status_label.setText("Import complete. Ready to close or start another import.")
         if self.open_dest_checkbox.isChecked():
             if self.dest_folder and os.path.isdir(self.dest_folder):
@@ -521,6 +605,14 @@ class ImageImporter(QMainWindow):
                     self.status_label.setText(f"Import complete, but failed to open folder: {e}")
         if had_issues:
             self._offer_save_log(log_lines)
+
+    def _on_view_log(self):
+        """Opens the full log from the most recent import, whether or not it had issues."""
+        if not self.last_import_log:
+            QMessageBox.information(self, "No Log Available", "There's no import log to show yet.")
+            return
+        dialog = LogViewerDialog(self.last_import_log, self)
+        dialog.exec()
 
     def _offer_save_log(self, log_lines):
         """
