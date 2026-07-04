@@ -244,21 +244,29 @@ def extract_preview_image_bytes(file_path: str):
     """
     Extracts an embedded preview/thumbnail image from a file using
     ExifTool -- what a camera's own LCD uses for playback -- without doing
-    a full RAW decode. Most RAW formats carry one.
+    a full RAW decode. Most RAW formats carry one, but different
+    manufacturers embed their largest version under different tag names,
+    so several are tried in descending order of expected size/quality:
 
-    Tries -PreviewImage first (larger, usually near full-resolution), then
-    falls back to -ThumbnailImage (smaller, but more universally present)
-    if no preview is embedded.
+      JpgFromRaw2 / JpgFromRaw  -- near full-resolution; common on
+                                   Panasonic and some Olympus RAW files,
+                                   which often don't populate PreviewImage
+      PreviewImage              -- medium-to-large; common on Canon/
+                                   Nikon/Sony
+      OtherImage                -- uncommon, occasional fallback
+      ThumbnailImage            -- small (often ~160x120) -- last resort,
+                                   likely too low-resolution to scan a
+                                   QR code from
 
-    Returns the raw image bytes (typically JPEG), or None if no embedded
-    preview/thumbnail was found, ExifTool is unavailable, or the file
-    doesn't exist.
+    Returns (image_bytes, tag_name) for the first tag that yields data
+    (tag_name without the leading '-', e.g. "PreviewImage"), or
+    (None, None) if nothing was found or ExifTool is unavailable.
     """
     exiftool_path = resolve_exiftool_path()
     if not exiftool_path or not os.path.exists(file_path):
-        return None
+        return None, None
 
-    for tag in ("-PreviewImage", "-ThumbnailImage"):
+    for tag in ("-JpgFromRaw2", "-JpgFromRaw", "-PreviewImage", "-OtherImage", "-ThumbnailImage"):
         try:
             result = subprocess.run(
                 [exiftool_path, "-b", tag, file_path],
@@ -266,11 +274,11 @@ def extract_preview_image_bytes(file_path: str):
                 timeout=SUBPROCESS_TIMEOUT, **SUBPROCESS_ARGS
             )
             if result.returncode == 0 and result.stdout:
-                return result.stdout
+                return result.stdout, tag.lstrip("-")
         except Exception as e:
             print(f"[Exif Error] Could not extract {tag} from {os.path.basename(file_path)}: {e}")
 
-    return None
+    return None, None
 
 
 # --- INTERNAL HELPER FUNCTIONS ---

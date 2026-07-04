@@ -29,6 +29,41 @@ from qr_codes import QR_MARKER
 DIRECT_DECODE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.tif', '.tiff')
 
 
+def get_scannable_frame_with_info(file_path: str):
+    """
+    Same as get_scannable_frame() below, but also returns a short
+    human-readable description of how the frame was obtained -- direct
+    decode vs. which ExifTool tag supplied a RAW preview, plus its pixel
+    dimensions. This is what makes it possible to tell "no QR was found
+    because none was there" apart from "no QR was found because the
+    embedded preview was only 160x120 and never had a chance."
+
+    Returns (image_or_None, info_string).
+    """
+    if not file_path or not os.path.exists(file_path):
+        return None, "file not found"
+
+    ext = os.path.splitext(file_path)[1].lower()
+
+    if ext in DIRECT_DECODE_EXTENSIONS:
+        image = cv2.imread(file_path, cv2.IMREAD_COLOR)
+        if image is None:
+            return None, "direct decode failed"
+        h, w = image.shape[:2]
+        return image, f"direct decode, {w}x{h}"
+
+    preview_bytes, source_tag = exiftool_manager.extract_preview_image_bytes(file_path)
+    if not preview_bytes:
+        return None, "no embedded preview or thumbnail found"
+
+    buffer = np.frombuffer(preview_bytes, dtype=np.uint8)
+    image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+    if image is None:
+        return None, f"embedded {source_tag} found but could not be decoded as an image"
+    h, w = image.shape[:2]
+    return image, f"RAW preview via {source_tag}, {w}x{h}"
+
+
 def get_scannable_frame(file_path: str):
     """
     Returns a decoded image as a BGR numpy array (OpenCV's native format),
@@ -39,23 +74,13 @@ def get_scannable_frame(file_path: str):
     - Everything else (RAW formats, HEIC/HEIF) is routed through
       ExifTool's embedded preview/thumbnail extraction first, since
       OpenCV can't decode those directly.
+
+    See get_scannable_frame_with_info() for a version that also explains
+    how the frame was obtained, useful for diagnosing low-resolution
+    previews.
     """
-    if not file_path or not os.path.exists(file_path):
-        return None
-
-    ext = os.path.splitext(file_path)[1].lower()
-
-    if ext in DIRECT_DECODE_EXTENSIONS:
-        image = cv2.imread(file_path, cv2.IMREAD_COLOR)
-        return image if image is not None else None
-
-    preview_bytes = exiftool_manager.extract_preview_image_bytes(file_path)
-    if not preview_bytes:
-        return None
-
-    buffer = np.frombuffer(preview_bytes, dtype=np.uint8)
-    image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
-    return image if image is not None else None
+    image, _info = get_scannable_frame_with_info(file_path)
+    return image
 
 
 def decode_lens_preset_qr(image):

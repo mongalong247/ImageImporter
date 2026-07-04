@@ -153,13 +153,13 @@ class ImportWorker(QObject):
             filename = os.path.basename(file_path)
 
             try:
-                frame = qr_scan.get_scannable_frame(file_path)
+                frame, frame_info = qr_scan.get_scannable_frame_with_info(file_path)
             except Exception as e:
-                frame = None
+                frame, frame_info = None, f"extraction error: {e}"
                 self._log(f"Warning: Could not extract a scannable image from {filename}: {e}")
 
             if frame is None:
-                self._log(f"No scannable image available for {filename} (unsupported format or no embedded preview) -- treated as no QR.")
+                self._log(f"No scannable image available for {filename} ({frame_info}) -- treated as no QR.")
                 preset_map[file_path] = active_preset
                 continue
 
@@ -173,9 +173,9 @@ class ImportWorker(QObject):
                 preset_name = decoded.get("name", "unnamed preset")
                 active_preset = {k: v for k, v in decoded.items() if k != "name"}
                 slate_frame_paths.append(file_path)
-                self._log(f"Detected lens-slate QR in {filename} -- switching to preset '{preset_name}'.")
+                self._log(f"Detected lens-slate QR in {filename} ({frame_info}) -- switching to preset '{preset_name}'.")
             else:
-                self._log(f"No lens-slate QR found in {filename}.")
+                self._log(f"No lens-slate QR found in {filename} ({frame_info}).")
 
             preset_map[file_path] = active_preset
 
