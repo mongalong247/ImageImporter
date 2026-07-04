@@ -8,7 +8,7 @@ from datetime import datetime
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QLabel, QPushButton, QFileDialog, QComboBox, QHBoxLayout,
     QProgressBar, QCheckBox, QLineEdit, QTextEdit, QGroupBox, QGridLayout, QApplication, QMessageBox,
-    QDialog
+    QDialog, QScrollArea
 )
 # New: Import QIcon for setting the application icon
 from PyQt6.QtGui import QAction, QIcon
@@ -78,7 +78,7 @@ class ImportWorker(QObject):
     status = pyqtSignal(str)
     finished = pyqtSignal()
 
-    def __init__(self, source_folder, source_files, dest_folder, backup_folder, structure, date_format, metadata):
+    def __init__(self, source_folder, source_files, dest_folder, backup_folder, structure, date_format, metadata, move_slate_frames=False):
         super().__init__()
         self.source_folder = source_folder
         self.source_files = source_files
@@ -87,6 +87,7 @@ class ImportWorker(QObject):
         self.structure = structure
         self.date_format = date_format
         self.metadata = metadata
+        self.move_slate_frames = move_slate_frames
         self.is_running = True
         self.log_lines = []   # full timestamped log of this run, for optional saving
         self.had_issues = False  # True if any file failed or a warning occurred
@@ -218,6 +219,7 @@ class ImportWorker(QObject):
                 )
                 preset_map, slate_frame_paths = self._build_preset_segments(ordered_paths)
 
+            slate_frame_path_set = set(slate_frame_paths)
             succeeded = 0
             failed = 0
             renamed = 0
@@ -235,7 +237,13 @@ class ImportWorker(QObject):
                     else:
                         subfolder_name = datetime.now().strftime(self.date_format)
 
-                    dest_path_with_subfolder = os.path.join(self.dest_folder, subfolder_name)
+                    is_slate_frame = file_path in slate_frame_path_set
+                    if self.move_slate_frames and is_slate_frame:
+                        effective_subfolder = os.path.join(subfolder_name, "slates")
+                    else:
+                        effective_subfolder = subfolder_name
+
+                    dest_path_with_subfolder = os.path.join(self.dest_folder, effective_subfolder)
                     os.makedirs(dest_path_with_subfolder, exist_ok=True)
                     dest_file_path = os.path.join(dest_path_with_subfolder, filename)
 
@@ -251,7 +259,7 @@ class ImportWorker(QObject):
                     shutil.copy2(file_path, final_dest_path)
 
                     if self.backup_folder:
-                        backup_path_with_subfolder = os.path.join(self.backup_folder, subfolder_name)
+                        backup_path_with_subfolder = os.path.join(self.backup_folder, effective_subfolder)
                         os.makedirs(backup_path_with_subfolder, exist_ok=True)
                         backup_file_path = self._get_unique_dest_path(
                             os.path.join(backup_path_with_subfolder, filename)
@@ -289,7 +297,10 @@ class ImportWorker(QObject):
                 if renamed:
                     summary += f" {renamed} renamed to avoid overwriting existing files."
                 if slate_frame_paths:
-                    summary += f" {len(slate_frame_paths)} QR lens-slate frame(s) detected."
+                    if self.move_slate_frames:
+                        summary += f" {len(slate_frame_paths)} QR lens-slate frame(s) detected and moved into 'slates' subfolders."
+                    else:
+                        summary += f" {len(slate_frame_paths)} QR lens-slate frame(s) detected."
                 if failed:
                     summary += f" {failed} failed -- see status messages above for details."
                 self._log(summary)
@@ -353,14 +364,28 @@ class ImageImporter(QMainWindow):
         super().__init__()
         self.setWindowTitle("Photo Import & Tagger")
         self.setGeometry(100, 100, 900, 600)
-        
+        self.setMinimumSize(700, 500)
+
         # New: Set the window icon using the resource path helper
         self.setWindowIcon(QIcon(resource_path("assets/app_icon.ico")))
-        
+
         self.settings = QSettings("PhotoTagger", "ImageImporter")
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        self.layout = QHBoxLayout(central_widget)
+
+        # The content here has grown over time (log viewer, QR status, etc.)
+        # and will likely keep growing. Rather than the window's minimum
+        # size creeping up with it and eventually exceeding a laptop's
+        # screen height (as happened before this fix), everything lives
+        # inside a scroll area: the window itself stays a sane, fixed
+        # minimum size, and content that doesn't fit scrolls instead of
+        # forcing the OS to fight over window geometry.
+        container_widget = QWidget()
+        self.layout = QHBoxLayout(container_widget)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(container_widget)
+        self.setCentralWidget(scroll_area)
+
         self.source_folder = ""
         self.selected_files = []
         self.dest_folder = ""
@@ -414,6 +439,12 @@ class ImageImporter(QMainWindow):
         self.metadata_toggle.toggled.connect(self.metadata_panel.setVisible)
         self.open_dest_checkbox = QCheckBox("Open destination folder after import")
         self.open_dest_checkbox.setToolTip("If checked, the primary destination folder will open automatically when the import finishes.")
+        self.move_slates_checkbox = QCheckBox("Move detected slate frames into a 'slates' subfolder")
+        self.move_slates_checkbox.setToolTip(
+            "If checked, any frame where a lens-preset QR code was detected is filed into a "
+            "'slates' subfolder (inside each date folder) instead of alongside your regular photos. "
+            "Off by default -- slate frames are imported like any other photo unless you enable this."
+        )
         self.import_button = QPushButton("Start Import")
         self.import_button.setStyleSheet("font-weight: bold; padding: 8px;")
         self.import_button.clicked.connect(self.start_import)
@@ -449,6 +480,7 @@ class ImageImporter(QMainWindow):
         self.exiftool_status_label.setStyleSheet(NORMAL_STYLE)
         self.import_layout.addWidget(self.exiftool_status_label)
         self.import_layout.addWidget(self.open_dest_checkbox)
+        self.import_layout.addWidget(self.move_slates_checkbox)
         self.import_layout.addStretch()
         self.import_layout.addWidget(self.import_button)
         self.import_layout.addWidget(self.view_log_button)
@@ -574,7 +606,7 @@ class ImageImporter(QMainWindow):
         self.import_worker = ImportWorker(
             source_folder=self.source_folder, source_files=self.selected_files, dest_folder=self.dest_folder,
             backup_folder=self.backup_folder, structure=self.structure_dropdown.currentText(), date_format=python_format,
-            metadata=current_metadata)
+            metadata=current_metadata, move_slate_frames=self.move_slates_checkbox.isChecked())
         self.import_thread = QThread()
         self.import_worker.moveToThread(self.import_thread)
         self.import_thread.started.connect(self.import_worker.run)
@@ -644,6 +676,7 @@ class ImageImporter(QMainWindow):
     def load_settings(self):
         self.date_format_combo.setCurrentText(self.settings.value("dateFormat", "YYYY-MM-DD"))
         self.open_dest_checkbox.setChecked(self.settings.value("openDestAfterImport", False, type=bool))
+        self.move_slates_checkbox.setChecked(self.settings.value("moveSlateFramesToSubfolder", False, type=bool))
         last_source = self.settings.value("lastSourcePath", "")
         if last_source and os.path.isdir(last_source):
             self.source_folder = last_source
@@ -664,6 +697,7 @@ class ImageImporter(QMainWindow):
     def save_settings(self):
         self.settings.setValue("dateFormat", self.date_format_combo.currentText())
         self.settings.setValue("openDestAfterImport", self.open_dest_checkbox.isChecked())
+        self.settings.setValue("moveSlateFramesToSubfolder", self.move_slates_checkbox.isChecked())
         self.settings.setValue("lastSourcePath", self.source_folder)
         self.settings.setValue("lastDestPath", self.dest_folder)
         self.settings.setValue("lastBackupPath", self.backup_folder)
