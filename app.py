@@ -16,7 +16,8 @@ from PyQt6.QtCore import QObject, pyqtSignal, QThread, QSettings
 
 # --- Modular Imports ---
 import exiftool_manager
-import qr_scan
+import aruco_scan
+import aruco_codes
 from metadata_panel import MetadataManagerPanel
 
 # --- CONSTANTS ---
@@ -86,7 +87,7 @@ class ImportWorker(QObject):
     finished = pyqtSignal()
 
     def __init__(self, source_folder, source_files, dest_folder, backup_folder, structure, date_format,
-                 metadata, apply_metadata=False, autodetect_qr=False, move_slate_frames=False):
+                 metadata, apply_metadata=False, autodetect_aruco=False, move_slate_frames=False, all_presets=None):
         super().__init__()
         self.source_folder = source_folder
         self.source_files = source_files
@@ -95,9 +96,10 @@ class ImportWorker(QObject):
         self.structure = structure
         self.date_format = date_format
         self.metadata = metadata  # the Active Metadata tab's fields, used as the base preset when apply_metadata is on
-        self.apply_metadata = apply_metadata  # "Apply custom metadata" checkbox -- the old, QR-independent behavior
-        self.autodetect_qr = autodetect_qr    # "Autodetect scanned QR codes" checkbox -- independent of the above
+        self.apply_metadata = apply_metadata  # "Apply custom metadata" checkbox -- the old, tag-independent behavior
+        self.autodetect_aruco = autodetect_aruco  # "Autodetect scanned ArUco tags" checkbox -- independent of the above
         self.move_slate_frames = move_slate_frames
+        self.all_presets = all_presets or {}  # full presets library (name -> fields incl. ArucoId), for ID lookup
         self.is_running = True
         self.log_lines = []   # full timestamped log of this run, for optional saving
         self.had_issues = False  # True if any file failed or a warning occurred
@@ -132,27 +134,38 @@ class ImportWorker(QObject):
     def _build_preset_segments(self, ordered_paths, base_preset):
         """
         Scans files -- already in chronological (capture-time) order -- for
-        lens-preset QR slate frames, and builds a per-file metadata map:
-        every file gets whichever QR preset was most recently seen before
-        it, or base_preset if no QR frame has appeared yet in the batch.
+        lens-preset ArUco tags, and builds a per-file metadata map: every
+        file gets whichever preset was most recently matched before it, or
+        base_preset if no tag has appeared yet in the batch.
+
+        Unlike the QR approach this replaced, an ArUco tag only carries a
+        small integer ID -- the actual lens data lives locally, in
+        self.all_presets, keyed by each preset's own ArucoId. That means a
+        detected ID with no matching local preset is a real, distinct
+        failure mode (someone else's tag, a preset that was since deleted,
+        a stale local presets file) and gets its own explicit log line
+        rather than being silently treated the same as "no tag found".
 
         base_preset is the Active Metadata tab's fields when "Apply custom
         metadata" is also on, or an empty dict when it's off -- i.e. in
-        QR-only mode, files before the first detected slate simply get no
-        metadata, rather than falling back to whatever's sitting in the
-        Active Metadata tab regardless of whether that checkbox is checked.
-
-        Logs the outcome of every file's QR check individually, split into
-        three distinct cases (no scannable frame available at all / a frame
-        was scanned but no QR found in it / a lens-preset QR was decoded)
-        so a failure can be pinned to a specific stage rather than just
-        showing up as "nothing got applied".
+        autodetect-only mode, files before the first detected tag simply
+        get no metadata, rather than falling back to whatever's sitting in
+        the Active Metadata tab regardless of whether that checkbox is
+        checked.
 
         Returns (preset_map, slate_frame_paths) where preset_map maps
         file_path -> metadata dict to apply, and slate_frame_paths lists
-        every file that was itself detected as a QR slate frame (not yet
-        acted on -- that's the "move slate frames" step, still to come).
+        every file that was itself detected as a tag frame (not yet acted
+        on -- that's the "move slate frames" step).
         """
+        id_to_preset = {}
+        id_to_name = {}
+        for name, data in self.all_presets.items():
+            aruco_id = data.get("ArucoId")
+            if aruco_id:
+                id_to_preset[aruco_id] = {field: data.get(field, "") for field in aruco_codes.PRESET_FIELDS}
+                id_to_name[aruco_id] = name
+
         preset_map = {}
         slate_frame_paths = []
         active_preset = base_preset
@@ -164,29 +177,40 @@ class ImportWorker(QObject):
             filename = os.path.basename(file_path)
 
             try:
-                frame, frame_info = qr_scan.get_scannable_frame_with_info(file_path)
+                frame, frame_info = aruco_scan.get_scannable_frame_with_info(file_path)
             except Exception as e:
                 frame, frame_info = None, f"extraction error: {e}"
                 self._log(f"Warning: Could not extract a scannable image from {filename}: {e}")
 
             if frame is None:
-                self._log(f"No scannable image available for {filename} ({frame_info}) -- treated as no QR.")
+                self._log(f"No scannable image available for {filename} ({frame_info}) -- treated as no tag.")
                 preset_map[file_path] = active_preset
                 continue
 
             try:
-                decoded = qr_scan.decode_lens_preset_qr(frame)
+                aruco_id = aruco_scan.decode_aruco_id(frame)
             except Exception as e:
-                decoded = None
-                self._log(f"Warning: QR decode failed for {filename}: {e}")
+                aruco_id = None
+                self._log(f"Warning: ArUco decode failed for {filename}: {e}")
 
-            if decoded:
-                preset_name = decoded.get("name", "unnamed preset")
-                active_preset = {k: v for k, v in decoded.items() if k != "name"}
-                slate_frame_paths.append(file_path)
-                self._log(f"Detected lens-slate QR in {filename} ({frame_info}) -- switching to preset '{preset_name}'.")
+            if aruco_id is not None:
+                matched_preset = id_to_preset.get(aruco_id)
+                if matched_preset is not None:
+                    active_preset = matched_preset
+                    slate_frame_paths.append(file_path)
+                    self._log(
+                        f"Detected ArUco tag #{aruco_id:03d} in {filename} ({frame_info}) "
+                        f"-- switching to preset '{id_to_name[aruco_id]}'."
+                    )
+                else:
+                    self.had_issues = True
+                    self._log(
+                        f"Warning: ArUco tag #{aruco_id:03d} detected in {filename} ({frame_info}), "
+                        "but no local preset has that ID -- check for a stale presets file or a "
+                        "tag printed on a different machine."
+                    )
             else:
-                self._log(f"No lens-slate QR found in {filename} ({frame_info}).")
+                self._log(f"No ArUco tag found in {filename} ({frame_info}).")
 
             preset_map[file_path] = active_preset
 
@@ -208,7 +232,7 @@ class ImportWorker(QObject):
             self._log(f"Starting import of {total_files} file(s)...")
 
             # Computed once up front and reused both for chronological
-            # ordering/QR segmentation below and for shot-date subfolder
+            # ordering/ArUco segmentation below and for shot-date subfolder
             # naming in the main loop, instead of asking ExifTool for the
             # same file's date twice.
             shot_dates = {file_path: exiftool_manager.get_shot_date(file_path) for file_path in image_paths}
@@ -217,8 +241,8 @@ class ImportWorker(QObject):
             preset_map = {}
             slate_frame_paths = []
 
-            if self.autodetect_qr:
-                # QR cut points only make sense in capture-time order, not
+            if self.autodetect_aruco:
+                # Tag cut points only make sense in capture-time order, not
                 # filesystem/selection order, so re-sort chronologically.
                 # Files with no readable date sort last, in their original
                 # relative order.
@@ -227,14 +251,14 @@ class ImportWorker(QObject):
                     image_paths,
                     key=lambda p: (shot_dates[p] is None, shot_dates[p] or datetime.max, original_index[p])
                 )
-                # In QR-only mode (apply_metadata off), files before the
-                # first detected slate get nothing, rather than falling
+                # In autodetect-only mode (apply_metadata off), files before the
+                # first detected tag get nothing, rather than falling
                 # back to whatever's sitting in the Active Metadata tab
                 # regardless of whether that checkbox is actually checked.
                 base_preset = self.metadata if self.apply_metadata else {}
                 preset_map, slate_frame_paths = self._build_preset_segments(ordered_paths, base_preset)
             elif self.apply_metadata:
-                # Old, QR-independent behavior: one preset, blanket-applied
+                # Old, tag-independent behavior: one preset, blanket-applied
                 # to the whole batch, in whatever order files were given.
                 preset_map = {p: self.metadata for p in image_paths}
 
@@ -285,7 +309,7 @@ class ImportWorker(QObject):
                         )
                         shutil.copy2(file_path, backup_file_path)
 
-                    if self.apply_metadata or self.autodetect_qr:
+                    if self.apply_metadata or self.autodetect_aruco:
                         active_metadata = preset_map.get(file_path, self.metadata if self.apply_metadata else {})
                         applied_fields = {k: v for k, v in active_metadata.items() if v}
                         if applied_fields:
@@ -304,9 +328,9 @@ class ImportWorker(QObject):
                             self.had_issues = True
                             self._log(f"Warning: No metadata fields to write for {filename} -- the active preset is empty.")
                         else:
-                            # QR-only mode (apply_metadata off): no QR slate has been seen yet
-                            # for this file, so having nothing to write is expected, not an error.
-                            self._log(f"No QR lens preset active yet for {filename} -- nothing written.")
+                            # Autodetect-only mode (apply_metadata off): no ArUco tag has been
+                            # seen yet for this file, so having nothing to write is expected.
+                            self._log(f"No ArUco lens preset active yet for {filename} -- nothing written.")
 
                     succeeded += 1
                 except Exception as e:
@@ -325,15 +349,15 @@ class ImportWorker(QObject):
                     summary += f" {renamed} renamed to avoid overwriting existing files."
                 if slate_frame_paths:
                     if self.move_slate_frames:
-                        summary += f" {len(slate_frame_paths)} QR lens-slate frame(s) detected and moved into 'slates' subfolders."
+                        summary += f" {len(slate_frame_paths)} ArUco lens-slate frame(s) detected and moved into 'slates' subfolders."
                     else:
-                        summary += f" {len(slate_frame_paths)} QR lens-slate frame(s) detected."
-                elif self.autodetect_qr:
+                        summary += f" {len(slate_frame_paths)} ArUco lens-slate frame(s) detected."
+                elif self.autodetect_aruco:
                     # Silent zero-detection is exactly the failure mode that's easy to miss --
                     # say it plainly, and treat it as worth a second look rather than burying
                     # it as just another line in a "successful" run.
                     self.had_issues = True
-                    summary += " 0 QR lens-slate frames detected -- no QR-based metadata was applied."
+                    summary += " 0 ArUco lens-slate frames detected -- no tag-based metadata was applied."
                 if failed:
                     summary += f" {failed} failed -- see status messages above for details."
                 self._log(summary)
@@ -348,7 +372,7 @@ class LogViewerDialog(QDialog):
     Shows the full log from an import run in a scrollable, read-only text
     box, with the option to save it. Available after every run (not just
     ones with errors) so behavior can be inspected even when nothing threw
-    an exception -- e.g. confirming whether a QR slate frame was actually
+    an exception -- e.g. confirming whether a ArUco tag was actually
     detected, and exactly which metadata fields were applied to which file.
     """
     def __init__(self, log_lines, parent=None):
@@ -404,7 +428,7 @@ class ImageImporter(QMainWindow):
 
         self.settings = QSettings("PhotoTagger", "ImageImporter")
 
-        # The content here has grown over time (log viewer, QR status, etc.)
+        # The content here has grown over time (log viewer, ArUco status, etc.)
         # and will likely keep growing. Rather than the window's minimum
         # size creeping up with it and eventually exceeding a laptop's
         # screen height (as happened before this fix), everything lives
@@ -471,21 +495,22 @@ class ImageImporter(QMainWindow):
         self.metadata_toggle = QCheckBox("Apply custom metadata")
         self.metadata_toggle.setToolTip(
             "Applies the Active Metadata tab's fields to every imported file. "
-            "Independent of QR autodetection below -- use either, both, or neither."
+            "Independent of ArUco autodetection below -- use either, both, or neither."
         )
         self.metadata_toggle.toggled.connect(self.metadata_panel.setVisible)
-        self.qr_autodetect_checkbox = QCheckBox("Autodetect scanned QR codes")
-        self.qr_autodetect_checkbox.setToolTip(
-            "Scans each file for a lens-preset QR slate frame and tags files from that point "
-            "onward with the decoded preset. If 'Apply custom metadata' is also checked, the "
-            "Active Metadata tab is used as the starting preset before the first QR code is found; "
-            "otherwise, files before the first detected QR get no metadata written."
+        self.aruco_autodetect_checkbox = QCheckBox("Autodetect scanned ArUco tags")
+        self.aruco_autodetect_checkbox.setToolTip(
+            "Scans each file for a lens-preset ArUco tag and tags files from that point "
+            "onward with the matching preset (looked up locally by the tag's ID). If 'Apply "
+            "custom metadata' is also checked, the Active Metadata tab is used as the starting "
+            "preset before the first tag is found; otherwise, files before the first detected "
+            "tag get no metadata written."
         )
         self.open_dest_checkbox = QCheckBox("Open destination folder after import")
         self.open_dest_checkbox.setToolTip("If checked, the primary destination folder will open automatically when the import finishes.")
         self.move_slates_checkbox = QCheckBox("Move detected slate frames into a 'slates' subfolder")
         self.move_slates_checkbox.setToolTip(
-            "If checked, any frame where a lens-preset QR code was detected is filed into a "
+            "If checked, any frame where a lens-preset ArUco tag was detected is filed into a "
             "'slates' subfolder (inside each date folder) instead of alongside your regular photos. "
             "Off by default -- slate frames are imported like any other photo unless you enable this."
         )
@@ -519,7 +544,7 @@ class ImageImporter(QMainWindow):
         self.import_layout.addWidget(self.date_format_combo)
         self.import_layout.addSpacing(10)
         self.import_layout.addWidget(self.metadata_toggle)
-        self.import_layout.addWidget(self.qr_autodetect_checkbox)
+        self.import_layout.addWidget(self.aruco_autodetect_checkbox)
         self.exiftool_status_label = QLabel("ExifTool: checking...")
         self.exiftool_status_label.setWordWrap(True)
         self.exiftool_status_label.setStyleSheet(NORMAL_STYLE)
@@ -577,14 +602,14 @@ class ImageImporter(QMainWindow):
         self.exiftool_available = success
         self.exiftool_status_label.setText(("ExifTool: " if success else "ExifTool unavailable: ") + message)
         self.exiftool_status_label.setStyleSheet(OK_STYLE if success else WARNING_STYLE)
-        # Metadata tagging (and QR scanning of RAW files, which relies on ExifTool to pull
+        # Metadata tagging (and ArUco scanning of RAW files, which relies on ExifTool to pull
         # each file's embedded preview) can't work without ExifTool -- reflect that in both
         # toggles, but don't fight the user if they re-enable it after fixing the path.
         self.metadata_toggle.setEnabled(success)
-        self.qr_autodetect_checkbox.setEnabled(success)
+        self.aruco_autodetect_checkbox.setEnabled(success)
         if not success:
             self.metadata_toggle.setChecked(False)
-            self.qr_autodetect_checkbox.setChecked(False)
+            self.aruco_autodetect_checkbox.setChecked(False)
 
     # ... (All other class methods like select_source_files, start_import, load_settings, etc. remain unchanged)
     def select_source_files(self):
@@ -655,7 +680,8 @@ class ImageImporter(QMainWindow):
             source_folder=self.source_folder, source_files=self.selected_files, dest_folder=self.dest_folder,
             backup_folder=self.backup_folder, structure=self.structure_dropdown.currentText(), date_format=python_format,
             metadata=current_metadata, apply_metadata=self.metadata_toggle.isChecked(),
-            autodetect_qr=self.qr_autodetect_checkbox.isChecked(), move_slate_frames=self.move_slates_checkbox.isChecked())
+            autodetect_aruco=self.aruco_autodetect_checkbox.isChecked(), move_slate_frames=self.move_slates_checkbox.isChecked(),
+            all_presets=self.metadata_panel.presets)
         self.import_thread = QThread()
         self.import_worker.moveToThread(self.import_thread)
         self.import_thread.started.connect(self.import_worker.run)
@@ -726,7 +752,7 @@ class ImageImporter(QMainWindow):
         self.date_format_combo.setCurrentText(self.settings.value("dateFormat", "YYYY-MM-DD"))
         self.open_dest_checkbox.setChecked(self.settings.value("openDestAfterImport", False, type=bool))
         self.move_slates_checkbox.setChecked(self.settings.value("moveSlateFramesToSubfolder", False, type=bool))
-        self.qr_autodetect_checkbox.setChecked(self.settings.value("autodetectQrCodes", False, type=bool))
+        self.aruco_autodetect_checkbox.setChecked(self.settings.value("autodetectArucoTags", False, type=bool))
         last_source = self.settings.value("lastSourcePath", "")
         if last_source and os.path.isdir(last_source):
             self.source_folder = last_source
@@ -748,7 +774,7 @@ class ImageImporter(QMainWindow):
         self.settings.setValue("dateFormat", self.date_format_combo.currentText())
         self.settings.setValue("openDestAfterImport", self.open_dest_checkbox.isChecked())
         self.settings.setValue("moveSlateFramesToSubfolder", self.move_slates_checkbox.isChecked())
-        self.settings.setValue("autodetectQrCodes", self.qr_autodetect_checkbox.isChecked())
+        self.settings.setValue("autodetectArucoTags", self.aruco_autodetect_checkbox.isChecked())
         self.settings.setValue("lastSourcePath", self.source_folder)
         self.settings.setValue("lastDestPath", self.dest_folder)
         self.settings.setValue("lastBackupPath", self.backup_folder)

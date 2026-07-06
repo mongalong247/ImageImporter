@@ -1,22 +1,55 @@
 import sys
 import os
 import json
+import re
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QComboBox, QHBoxLayout,
     QLineEdit, QTextEdit, QGroupBox, QGridLayout, QApplication, QMessageBox,
     QTabWidget, QFileDialog, QDialog
 )
 from PyQt6.QtGui import QPixmap
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QSettings
 
 import paths
-import qr_codes
+import aruco_codes
 
 # Resolved centrally in paths.py so this always agrees with exiftool_manager
 # and app.py on where the persistent resources folder actually is, even in
 # a PyInstaller-frozen build.
 RESOURCES_DIR = paths.RESOURCES_DIR
 PRESETS_FILE_PATH = os.path.join(RESOURCES_DIR, "lens_presets.json")
+
+# Purely cosmetic list-ordering options for the saved-presets dropdown.
+# These never touch preset data or ArucoId assignments -- reordering here
+# only changes how presets are displayed, never what a printed tag means.
+SORT_MODE_NAME = "Name (A-Z)"
+SORT_MODE_FOCAL_WIDE_TO_LONG = "Focal Length (Wide to Long)"
+SORT_MODE_FOCAL_LONG_TO_WIDE = "Focal Length (Long to Wide)"
+SORT_MODE_BRAND = "Brand (A-Z)"
+SORT_MODES = (SORT_MODE_NAME, SORT_MODE_FOCAL_WIDE_TO_LONG, SORT_MODE_FOCAL_LONG_TO_WIDE, SORT_MODE_BRAND)
+
+
+def _extract_focal_length_value(focal_length_str: str) -> float:
+    """
+    Pulls the first number out of a focal length string like '50mm',
+    '85', or '24-70mm' for sorting purposes. Unparseable or missing
+    values sort to the end rather than crashing the sort.
+    """
+    match = re.search(r'(\d+(\.\d+)?)', focal_length_str or "")
+    return float(match.group(1)) if match else float('inf')
+
+
+def _focal_sort_key(focal_length_str: str, descending: bool = False):
+    """
+    Returns a sortable (unparseable_flag, value) tuple. Unparseable values
+    always sort last regardless of direction -- naively negating float('inf')
+    for a descending sort would otherwise push them to the front instead.
+    """
+    value = _extract_focal_length_value(focal_length_str)
+    if value == float('inf'):
+        return (1, 0.0)
+    return (0, -value if descending else value)
+
 
 class MetadataManagerPanel(QWidget):
     """
@@ -26,6 +59,7 @@ class MetadataManagerPanel(QWidget):
     def __init__(self):
         super().__init__()
         self.presets = {}  # In-memory dictionary to hold loaded presets
+        self.settings = QSettings("PhotoTagger", "ImageImporter")
 
         # --- Main Layout ---
         main_layout = QVBoxLayout(self)
@@ -37,6 +71,9 @@ class MetadataManagerPanel(QWidget):
         self._create_active_metadata_tab()
 
         # --- Final Setup ---
+        saved_sort_mode = self.settings.value("presetSortMode", SORT_MODE_NAME, type=str)
+        if saved_sort_mode in SORT_MODES:
+            self.sort_combo.setCurrentText(saved_sort_mode)
         self._load_presets_from_file() # Load presets and populate the UI
 
     def get_active_metadata(self) -> dict:
@@ -102,6 +139,19 @@ class MetadataManagerPanel(QWidget):
         load_layout = QVBoxLayout(load_group)
 
         load_layout.addWidget(QLabel("Saved Presets:"))
+
+        sort_row = QHBoxLayout()
+        sort_row.addWidget(QLabel("Sort by:"))
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems(SORT_MODES)
+        self.sort_combo.setToolTip(
+            "Purely cosmetic -- changes how this list is ordered, nothing about the "
+            "underlying presets or their ArUco tag IDs."
+        )
+        self.sort_combo.currentTextChanged.connect(self._on_sort_mode_changed)
+        sort_row.addWidget(self.sort_combo, 1)
+        load_layout.addLayout(sort_row)
+
         self.presets_combo = QComboBox()
         self.presets_combo.setToolTip("Select a saved lens preset.")
         load_layout.addWidget(self.presets_combo)
@@ -116,14 +166,14 @@ class MetadataManagerPanel(QWidget):
         self.delete_button.setToolTip("Permanently deletes the selected preset.")
         self.delete_button.clicked.connect(self._on_delete_preset)
 
-        self.generate_qr_button = QPushButton("Generate QR Code...")
-        self.generate_qr_button.setToolTip(
-            "Creates a printable QR code for the selected preset -- scan it as your "
+        self.generate_aruco_button = QPushButton("Generate ArUco Tag...")
+        self.generate_aruco_button.setToolTip(
+            "Creates a printable ArUco marker for the selected preset -- scan it as your "
             "first frame after changing lens or aperture."
         )
-        self.generate_qr_button.clicked.connect(self._on_generate_qr)
+        self.generate_aruco_button.clicked.connect(self._on_generate_aruco_tag)
 
-        load_button_layout.addWidget(self.generate_qr_button)
+        load_button_layout.addWidget(self.generate_aruco_button)
         load_button_layout.addStretch(1) # Add stretch to push buttons to the right
         load_button_layout.addWidget(self.delete_button)
         load_button_layout.addWidget(self.load_button)
@@ -200,10 +250,38 @@ class MetadataManagerPanel(QWidget):
             QMessageBox.critical(self, "Error", f"Could not save presets file:\n{e}")
 
     def _update_presets_combo(self):
-        """Clears and repopulates the presets dropdown from the in-memory dictionary."""
+        """Clears and repopulates the presets dropdown, ordered by the current sort mode."""
         self.presets_combo.clear()
-        sorted_presets = sorted(self.presets.keys())
-        self.presets_combo.addItems(sorted_presets)
+        self.presets_combo.addItems(self._get_sorted_preset_names())
+
+    def _get_sorted_preset_names(self):
+        """
+        Returns preset names ordered by whatever's selected in the sort
+        dropdown. Purely a display concern -- this never touches preset
+        data, ArucoId assignments, or the underlying JSON file.
+        """
+        mode = self.sort_combo.currentText() if hasattr(self, "sort_combo") else SORT_MODE_NAME
+
+        if mode == SORT_MODE_FOCAL_WIDE_TO_LONG:
+            return sorted(
+                self.presets.keys(),
+                key=lambda name: (_focal_sort_key(self.presets[name].get("FocalLength", ""), descending=False), name)
+            )
+        if mode == SORT_MODE_FOCAL_LONG_TO_WIDE:
+            return sorted(
+                self.presets.keys(),
+                key=lambda name: (_focal_sort_key(self.presets[name].get("FocalLength", ""), descending=True), name)
+            )
+        if mode == SORT_MODE_BRAND:
+            return sorted(
+                self.presets.keys(),
+                key=lambda name: (self.presets[name].get("LensMake", "").lower(), name)
+            )
+        return sorted(self.presets.keys())
+
+    def _on_sort_mode_changed(self, _mode: str):
+        self.settings.setValue("presetSortMode", self.sort_combo.currentText())
+        self._update_presets_combo()
 
     # --- Signal Handlers (Slots) ---
 
@@ -264,24 +342,33 @@ class MetadataManagerPanel(QWidget):
                 self._update_presets_combo()
                 QMessageBox.information(self, "Preset Deleted", f"Preset '{preset_name}' has been deleted.")
 
-    def _on_generate_qr(self):
-        """Generates and previews a printable QR code for the selected saved preset."""
+    def _on_generate_aruco_tag(self):
+        """Generates and previews a printable ArUco tag for the selected saved preset."""
         preset_name = self.presets_combo.currentText()
         if not preset_name:
-            QMessageBox.warning(self, "No Preset Selected", "Please select a saved preset to generate a QR code for.")
+            QMessageBox.warning(self, "No Preset Selected", "Please select a saved preset to generate a tag for.")
             return
 
         preset_data = self.presets.get(preset_name)
         if not preset_data:
             return
 
+        # Assigned once and frozen from here on: a physically printed tag has to keep
+        # meaning the same thing indefinitely, so re-generating for the same preset
+        # always returns its existing ID rather than issuing a new one.
+        aruco_id = aruco_codes.get_or_assign_id(preset_data)
+        if preset_data.get("ArucoId") != aruco_id:
+            preset_data["ArucoId"] = aruco_id
+            self.presets[preset_name] = preset_data
+            self._save_presets_to_file()
+
         try:
-            qr_image = qr_codes.generate_preset_qr(preset_name, preset_data)
+            tag_image = aruco_codes.generate_aruco_tag(preset_name, aruco_id)
         except Exception as e:
-            QMessageBox.critical(self, "QR Generation Failed", f"Could not generate a QR code:\n{e}")
+            QMessageBox.critical(self, "Tag Generation Failed", f"Could not generate an ArUco tag:\n{e}")
             return
 
-        dialog = QRCodePreviewDialog(qr_image, preset_name, self)
+        dialog = ArucoTagPreviewDialog(tag_image, preset_name, aruco_id, self)
         dialog.exec()
 
     def _on_export_presets(self):
@@ -384,24 +471,23 @@ class MetadataManagerPanel(QWidget):
         QMessageBox.information(self, "Import Complete", summary)
 
 
-class QRCodePreviewDialog(QDialog):
+class ArucoTagPreviewDialog(QDialog):
     """
-    Shows the generated QR code for a preset and lets the user save it as a
-    PNG to print, or copy it to the clipboard. Kept intentionally simple for
-    step 1 of the QR roadmap -- no batch/label-sheet printing yet, just one
-    code at a time.
+    Shows the generated ArUco tag for a preset and lets the user save it as
+    a PNG to print, or copy it to the clipboard. One tag at a time -- no
+    batch/label-sheet printing yet.
     """
     # The on-screen preview is scaled to fit within this square; the
-    # full-resolution image (which can easily be 700px+ per side at this
-    # error-correction level) is kept separately for saving/copying so
-    # print quality isn't affected by the preview size.
+    # full-resolution image is kept separately for saving/copying so print
+    # quality isn't affected by the preview size.
     PREVIEW_MAX_SIZE = 420
 
-    def __init__(self, qr_image, preset_name: str, parent=None):
+    def __init__(self, tag_image, preset_name: str, aruco_id: int, parent=None):
         super().__init__(parent)
-        self.qr_image = qr_image
+        self.tag_image = tag_image
         self.preset_name = preset_name
-        self.setWindowTitle(f"QR Code - {preset_name}")
+        self.aruco_id = aruco_id
+        self.setWindowTitle(f"ArUco Tag #{aruco_id:03d} - {preset_name}")
         self.setMinimumSize(360, 420)
         self.setMaximumSize(1000, 1000)
         self.resize(480, 560)
@@ -409,7 +495,7 @@ class QRCodePreviewDialog(QDialog):
         layout = QVBoxLayout(self)
 
         self._full_pixmap = QPixmap()
-        self._full_pixmap.loadFromData(qr_codes.qr_image_to_png_bytes(qr_image))
+        self._full_pixmap.loadFromData(aruco_codes.marker_image_to_png_bytes(tag_image))
 
         preview_label = QLabel()
         preview_label.setPixmap(self._full_pixmap.scaled(
@@ -419,14 +505,16 @@ class QRCodePreviewDialog(QDialog):
         preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(preview_label)
 
-        size_label = QLabel(f"Full resolution: {qr_image.width}\u00d7{qr_image.height}px")
+        size_label = QLabel(f"ID #{aruco_id:03d}  \u00b7  Full resolution: {tag_image.width}\u00d7{tag_image.height}px")
         size_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         size_label.setStyleSheet("color: gray; font-size: 11px;")
         layout.addWidget(size_label)
 
         hint_label = QLabel(
             "Print this and place it inside your lens cap, or in a notebook. "
-            "Scan it as your first frame after changing lens or aperture."
+            "Scan it as your first frame after changing lens or aperture. "
+            "This ID is permanently tied to this preset -- deleting the preset "
+            "later won't free the ID for reuse."
         )
         hint_label.setWordWrap(True)
         hint_label.setStyleSheet("color: gray; font-style: italic;")
@@ -450,21 +538,21 @@ class QRCodePreviewDialog(QDialog):
         # Copies the full-resolution image, not the scaled-down preview,
         # so pasting elsewhere doesn't lose print quality.
         QApplication.clipboard().setPixmap(self._full_pixmap)
-        QMessageBox.information(self, "Copied", "QR code copied to clipboard (full resolution).")
+        QMessageBox.information(self, "Copied", "ArUco tag copied to clipboard (full resolution).")
 
     def _on_save(self):
         safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in self.preset_name).strip()
-        default_name = f"{safe_name or 'lens_preset'}_qr.png"
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save QR Code", default_name, "PNG Images (*.png)")
+        default_name = f"aruco_{self.aruco_id:03d}_{safe_name or 'lens_preset'}.png"
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save ArUco Tag", default_name, "PNG Images (*.png)")
         if not file_path:
             return
         if not file_path.lower().endswith(".png"):
             file_path += ".png"
         try:
-            self.qr_image.save(file_path)
-            QMessageBox.information(self, "Saved", f"QR code saved to:\n{file_path}")
+            self.tag_image.save(file_path)
+            QMessageBox.information(self, "Saved", f"ArUco tag saved to:\n{file_path}")
         except Exception as e:
-            QMessageBox.critical(self, "Save Failed", f"Could not save the QR code:\n{e}")
+            QMessageBox.critical(self, "Save Failed", f"Could not save the ArUco tag:\n{e}")
 
 
 # --- Standalone Test ---
