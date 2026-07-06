@@ -85,7 +85,8 @@ class ImportWorker(QObject):
     status = pyqtSignal(str)
     finished = pyqtSignal()
 
-    def __init__(self, source_folder, source_files, dest_folder, backup_folder, structure, date_format, metadata, move_slate_frames=False):
+    def __init__(self, source_folder, source_files, dest_folder, backup_folder, structure, date_format,
+                 metadata, apply_metadata=False, autodetect_qr=False, move_slate_frames=False):
         super().__init__()
         self.source_folder = source_folder
         self.source_files = source_files
@@ -93,7 +94,9 @@ class ImportWorker(QObject):
         self.backup_folder = backup_folder
         self.structure = structure
         self.date_format = date_format
-        self.metadata = metadata
+        self.metadata = metadata  # the Active Metadata tab's fields, used as the base preset when apply_metadata is on
+        self.apply_metadata = apply_metadata  # "Apply custom metadata" checkbox -- the old, QR-independent behavior
+        self.autodetect_qr = autodetect_qr    # "Autodetect scanned QR codes" checkbox -- independent of the above
         self.move_slate_frames = move_slate_frames
         self.is_running = True
         self.log_lines = []   # full timestamped log of this run, for optional saving
@@ -126,24 +129,24 @@ class ImportWorker(QObject):
                 return candidate
             counter += 1
 
-    def _build_preset_segments(self, ordered_paths):
+    def _build_preset_segments(self, ordered_paths, base_preset):
         """
         Scans files -- already in chronological (capture-time) order -- for
         lens-preset QR slate frames, and builds a per-file metadata map:
         every file gets whichever QR preset was most recently seen before
-        it, or the base self.metadata (from the Active Metadata tab) if no
-        QR frame has appeared yet in the batch.
+        it, or base_preset if no QR frame has appeared yet in the batch.
+
+        base_preset is the Active Metadata tab's fields when "Apply custom
+        metadata" is also on, or an empty dict when it's off -- i.e. in
+        QR-only mode, files before the first detected slate simply get no
+        metadata, rather than falling back to whatever's sitting in the
+        Active Metadata tab regardless of whether that checkbox is checked.
 
         Logs the outcome of every file's QR check individually, split into
         three distinct cases (no scannable frame available at all / a frame
         was scanned but no QR found in it / a lens-preset QR was decoded)
         so a failure can be pinned to a specific stage rather than just
         showing up as "nothing got applied".
-
-        Only called when metadata tagging is enabled: QR scanning has a
-        real cost -- an OpenCV decode per file, plus an extra ExifTool call
-        for RAW files to pull their embedded preview -- that isn't worth
-        paying when nothing will be written anyway.
 
         Returns (preset_map, slate_frame_paths) where preset_map maps
         file_path -> metadata dict to apply, and slate_frame_paths lists
@@ -152,7 +155,7 @@ class ImportWorker(QObject):
         """
         preset_map = {}
         slate_frame_paths = []
-        active_preset = self.metadata
+        active_preset = base_preset
 
         for file_path in ordered_paths:
             if not self.is_running:
@@ -214,7 +217,7 @@ class ImportWorker(QObject):
             preset_map = {}
             slate_frame_paths = []
 
-            if self.metadata:
+            if self.autodetect_qr:
                 # QR cut points only make sense in capture-time order, not
                 # filesystem/selection order, so re-sort chronologically.
                 # Files with no readable date sort last, in their original
@@ -224,7 +227,16 @@ class ImportWorker(QObject):
                     image_paths,
                     key=lambda p: (shot_dates[p] is None, shot_dates[p] or datetime.max, original_index[p])
                 )
-                preset_map, slate_frame_paths = self._build_preset_segments(ordered_paths)
+                # In QR-only mode (apply_metadata off), files before the
+                # first detected slate get nothing, rather than falling
+                # back to whatever's sitting in the Active Metadata tab
+                # regardless of whether that checkbox is actually checked.
+                base_preset = self.metadata if self.apply_metadata else {}
+                preset_map, slate_frame_paths = self._build_preset_segments(ordered_paths, base_preset)
+            elif self.apply_metadata:
+                # Old, QR-independent behavior: one preset, blanket-applied
+                # to the whole batch, in whatever order files were given.
+                preset_map = {p: self.metadata for p in image_paths}
 
             slate_frame_path_set = set(slate_frame_paths)
             succeeded = 0
@@ -273,13 +285,10 @@ class ImportWorker(QObject):
                         )
                         shutil.copy2(file_path, backup_file_path)
 
-                    if self.metadata:
-                        active_metadata = preset_map.get(file_path, self.metadata)
+                    if self.apply_metadata or self.autodetect_qr:
+                        active_metadata = preset_map.get(file_path, self.metadata if self.apply_metadata else {})
                         applied_fields = {k: v for k, v in active_metadata.items() if v}
-                        if not applied_fields:
-                            self.had_issues = True
-                            self._log(f"Warning: No metadata fields to write for {filename} -- the active preset is empty.")
-                        else:
+                        if applied_fields:
                             self._log(
                                 f"Applying metadata to {filename}: "
                                 + ", ".join(f"{k}={v}" for k, v in applied_fields.items())
@@ -287,6 +296,17 @@ class ImportWorker(QObject):
                             if not exiftool_manager.write_metadata(final_dest_path, active_metadata):
                                 self.had_issues = True
                                 self._log(f"Warning: Metadata write failed for {filename}")
+                        elif self.apply_metadata:
+                            # Apply custom metadata is on, so every file is expected to get at
+                            # least the base preset -- an empty result here means the Active
+                            # Metadata tab itself has nothing in it, which is a misconfiguration
+                            # worth flagging rather than a normal outcome.
+                            self.had_issues = True
+                            self._log(f"Warning: No metadata fields to write for {filename} -- the active preset is empty.")
+                        else:
+                            # QR-only mode (apply_metadata off): no QR slate has been seen yet
+                            # for this file, so having nothing to write is expected, not an error.
+                            self._log(f"No QR lens preset active yet for {filename} -- nothing written.")
 
                     succeeded += 1
                 except Exception as e:
@@ -308,6 +328,12 @@ class ImportWorker(QObject):
                         summary += f" {len(slate_frame_paths)} QR lens-slate frame(s) detected and moved into 'slates' subfolders."
                     else:
                         summary += f" {len(slate_frame_paths)} QR lens-slate frame(s) detected."
+                elif self.autodetect_qr:
+                    # Silent zero-detection is exactly the failure mode that's easy to miss --
+                    # say it plainly, and treat it as worth a second look rather than burying
+                    # it as just another line in a "successful" run.
+                    self.had_issues = True
+                    summary += " 0 QR lens-slate frames detected -- no QR-based metadata was applied."
                 if failed:
                     summary += f" {failed} failed -- see status messages above for details."
                 self._log(summary)
@@ -443,7 +469,18 @@ class ImageImporter(QMainWindow):
         self.structure_dropdown = QComboBox()
         self.structure_dropdown.addItems(["Shot Date", "Import Date"])
         self.metadata_toggle = QCheckBox("Apply custom metadata")
+        self.metadata_toggle.setToolTip(
+            "Applies the Active Metadata tab's fields to every imported file. "
+            "Independent of QR autodetection below -- use either, both, or neither."
+        )
         self.metadata_toggle.toggled.connect(self.metadata_panel.setVisible)
+        self.qr_autodetect_checkbox = QCheckBox("Autodetect scanned QR codes")
+        self.qr_autodetect_checkbox.setToolTip(
+            "Scans each file for a lens-preset QR slate frame and tags files from that point "
+            "onward with the decoded preset. If 'Apply custom metadata' is also checked, the "
+            "Active Metadata tab is used as the starting preset before the first QR code is found; "
+            "otherwise, files before the first detected QR get no metadata written."
+        )
         self.open_dest_checkbox = QCheckBox("Open destination folder after import")
         self.open_dest_checkbox.setToolTip("If checked, the primary destination folder will open automatically when the import finishes.")
         self.move_slates_checkbox = QCheckBox("Move detected slate frames into a 'slates' subfolder")
@@ -482,6 +519,7 @@ class ImageImporter(QMainWindow):
         self.import_layout.addWidget(self.date_format_combo)
         self.import_layout.addSpacing(10)
         self.import_layout.addWidget(self.metadata_toggle)
+        self.import_layout.addWidget(self.qr_autodetect_checkbox)
         self.exiftool_status_label = QLabel("ExifTool: checking...")
         self.exiftool_status_label.setWordWrap(True)
         self.exiftool_status_label.setStyleSheet(NORMAL_STYLE)
@@ -539,11 +577,14 @@ class ImageImporter(QMainWindow):
         self.exiftool_available = success
         self.exiftool_status_label.setText(("ExifTool: " if success else "ExifTool unavailable: ") + message)
         self.exiftool_status_label.setStyleSheet(OK_STYLE if success else WARNING_STYLE)
-        # Metadata tagging can't work without ExifTool -- reflect that in the toggle,
-        # but don't fight the user if they re-enable it after fixing the path.
+        # Metadata tagging (and QR scanning of RAW files, which relies on ExifTool to pull
+        # each file's embedded preview) can't work without ExifTool -- reflect that in both
+        # toggles, but don't fight the user if they re-enable it after fixing the path.
         self.metadata_toggle.setEnabled(success)
+        self.qr_autodetect_checkbox.setEnabled(success)
         if not success:
             self.metadata_toggle.setChecked(False)
+            self.qr_autodetect_checkbox.setChecked(False)
 
     # ... (All other class methods like select_source_files, start_import, load_settings, etc. remain unchanged)
     def select_source_files(self):
@@ -609,11 +650,12 @@ class ImageImporter(QMainWindow):
         self.progress.setValue(0)
         user_format = self.date_format_combo.currentText()
         python_format = user_format.replace("YYYY", "%Y").replace("MM", "%m").replace("DD", "%d")
-        current_metadata = self.metadata_panel.get_active_metadata() if self.metadata_toggle.isChecked() else {}
+        current_metadata = self.metadata_panel.get_active_metadata()
         self.import_worker = ImportWorker(
             source_folder=self.source_folder, source_files=self.selected_files, dest_folder=self.dest_folder,
             backup_folder=self.backup_folder, structure=self.structure_dropdown.currentText(), date_format=python_format,
-            metadata=current_metadata, move_slate_frames=self.move_slates_checkbox.isChecked())
+            metadata=current_metadata, apply_metadata=self.metadata_toggle.isChecked(),
+            autodetect_qr=self.qr_autodetect_checkbox.isChecked(), move_slate_frames=self.move_slates_checkbox.isChecked())
         self.import_thread = QThread()
         self.import_worker.moveToThread(self.import_thread)
         self.import_thread.started.connect(self.import_worker.run)
@@ -684,6 +726,7 @@ class ImageImporter(QMainWindow):
         self.date_format_combo.setCurrentText(self.settings.value("dateFormat", "YYYY-MM-DD"))
         self.open_dest_checkbox.setChecked(self.settings.value("openDestAfterImport", False, type=bool))
         self.move_slates_checkbox.setChecked(self.settings.value("moveSlateFramesToSubfolder", False, type=bool))
+        self.qr_autodetect_checkbox.setChecked(self.settings.value("autodetectQrCodes", False, type=bool))
         last_source = self.settings.value("lastSourcePath", "")
         if last_source and os.path.isdir(last_source):
             self.source_folder = last_source
@@ -705,6 +748,7 @@ class ImageImporter(QMainWindow):
         self.settings.setValue("dateFormat", self.date_format_combo.currentText())
         self.settings.setValue("openDestAfterImport", self.open_dest_checkbox.isChecked())
         self.settings.setValue("moveSlateFramesToSubfolder", self.move_slates_checkbox.isChecked())
+        self.settings.setValue("autodetectQrCodes", self.qr_autodetect_checkbox.isChecked())
         self.settings.setValue("lastSourcePath", self.source_folder)
         self.settings.setValue("lastDestPath", self.dest_folder)
         self.settings.setValue("lastBackupPath", self.backup_folder)
