@@ -87,7 +87,10 @@ def decode_aruco_id(image):
 
     if ids is None or len(ids) == 0:
         return None
-    return int(ids[0][0])
+    # ids is normally shaped (N, 1), but some OpenCV builds/detection
+    # paths return (N,) instead -- flatten first so indexing is safe
+    # regardless of which shape comes back.
+    return int(np.asarray(ids).reshape(-1)[0])
 
 
 def scan_file_for_aruco_id(file_path: str):
