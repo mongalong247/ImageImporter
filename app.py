@@ -5,14 +5,14 @@ import json
 import platform
 import subprocess
 from datetime import datetime
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QLabel, QPushButton, QFileDialog, QComboBox, QHBoxLayout,
     QProgressBar, QCheckBox, QLineEdit, QTextEdit, QGroupBox, QGridLayout, QApplication, QMessageBox,
     QDialog, QScrollArea
 )
 # New: Import QIcon for setting the application icon
-from PyQt6.QtGui import QAction, QIcon
-from PyQt6.QtCore import QObject, pyqtSignal, QThread, QSettings
+from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import QObject, Signal, QThread, QSettings
 
 # --- Modular Imports ---
 import exiftool_manager
@@ -82,9 +82,9 @@ def open_folder(path):
 
 # --- BACKGROUND WORKER ---
 class ImportWorker(QObject):
-    progress = pyqtSignal(int)
-    status = pyqtSignal(str)
-    finished = pyqtSignal()
+    progress = Signal(int)
+    status = Signal(str)
+    finished = Signal()
 
     def __init__(self, source_folder, source_files, dest_folder, backup_folder, structure, date_format,
                  metadata, apply_metadata=False, autodetect_aruco=False, move_slate_frames=False, all_presets=None):

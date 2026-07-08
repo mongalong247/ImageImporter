@@ -14,7 +14,7 @@ A one-click photo import tool for photographers that:
 - ✅ Add metadata to EXIF via ExifTool
 - ✅ Create, load, and delete lens metadata presets
 - ✅ Automatically download and manage ExifTool on first run
-- ✅ Modern PyQt6-based GUI
+- ✅ Modern PySide6-based GUI
 - ✅ Windows support
 - ✅ Mac/Linux prompt for exiftool
 - ✅ Export/import of lens preset config

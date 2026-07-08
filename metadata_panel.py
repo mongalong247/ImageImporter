@@ -2,13 +2,13 @@ import sys
 import os
 import json
 import re
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QComboBox, QHBoxLayout,
     QLineEdit, QTextEdit, QGroupBox, QGridLayout, QApplication, QMessageBox,
     QTabWidget, QFileDialog, QDialog
 )
-from PyQt6.QtGui import QPixmap
-from PyQt6.QtCore import Qt, QSettings
+from PySide6.QtGui import QPixmap
+from PySide6.QtCore import Qt, QSettings
 
 import paths
 import aruco_codes

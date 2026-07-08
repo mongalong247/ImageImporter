@@ -5,7 +5,7 @@ import subprocess
 import json
 from datetime import datetime
 
-from PyQt6.QtCore import QSettings
+from PySide6.QtCore import QSettings
 
 import paths
 
