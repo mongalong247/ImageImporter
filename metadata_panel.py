@@ -1,19 +1,55 @@
 import sys
 import os
 import json
-from PyQt6.QtWidgets import (
+import re
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QComboBox, QHBoxLayout,
     QLineEdit, QTextEdit, QGroupBox, QGridLayout, QApplication, QMessageBox,
-    QTabWidget
+    QTabWidget, QFileDialog, QDialog
 )
+from PySide6.QtGui import QPixmap
+from PySide6.QtCore import Qt, QSettings
 
 import paths
+import aruco_codes
 
 # Resolved centrally in paths.py so this always agrees with exiftool_manager
 # and app.py on where the persistent resources folder actually is, even in
 # a PyInstaller-frozen build.
 RESOURCES_DIR = paths.RESOURCES_DIR
 PRESETS_FILE_PATH = os.path.join(RESOURCES_DIR, "lens_presets.json")
+
+# Purely cosmetic list-ordering options for the saved-presets dropdown.
+# These never touch preset data or ArucoId assignments -- reordering here
+# only changes how presets are displayed, never what a printed tag means.
+SORT_MODE_NAME = "Name (A-Z)"
+SORT_MODE_FOCAL_WIDE_TO_LONG = "Focal Length (Wide to Long)"
+SORT_MODE_FOCAL_LONG_TO_WIDE = "Focal Length (Long to Wide)"
+SORT_MODE_BRAND = "Brand (A-Z)"
+SORT_MODES = (SORT_MODE_NAME, SORT_MODE_FOCAL_WIDE_TO_LONG, SORT_MODE_FOCAL_LONG_TO_WIDE, SORT_MODE_BRAND)
+
+
+def _extract_focal_length_value(focal_length_str: str) -> float:
+    """
+    Pulls the first number out of a focal length string like '50mm',
+    '85', or '24-70mm' for sorting purposes. Unparseable or missing
+    values sort to the end rather than crashing the sort.
+    """
+    match = re.search(r'(\d+(\.\d+)?)', focal_length_str or "")
+    return float(match.group(1)) if match else float('inf')
+
+
+def _focal_sort_key(focal_length_str: str, descending: bool = False):
+    """
+    Returns a sortable (unparseable_flag, value) tuple. Unparseable values
+    always sort last regardless of direction -- naively negating float('inf')
+    for a descending sort would otherwise push them to the front instead.
+    """
+    value = _extract_focal_length_value(focal_length_str)
+    if value == float('inf'):
+        return (1, 0.0)
+    return (0, -value if descending else value)
+
 
 class MetadataManagerPanel(QWidget):
     """
@@ -23,6 +59,7 @@ class MetadataManagerPanel(QWidget):
     def __init__(self):
         super().__init__()
         self.presets = {}  # In-memory dictionary to hold loaded presets
+        self.settings = QSettings("PhotoTagger", "ImageImporter")
 
         # --- Main Layout ---
         main_layout = QVBoxLayout(self)
@@ -34,6 +71,9 @@ class MetadataManagerPanel(QWidget):
         self._create_active_metadata_tab()
 
         # --- Final Setup ---
+        saved_sort_mode = self.settings.value("presetSortMode", SORT_MODE_NAME, type=str)
+        if saved_sort_mode in SORT_MODES:
+            self.sort_combo.setCurrentText(saved_sort_mode)
         self._load_presets_from_file() # Load presets and populate the UI
 
     def get_active_metadata(self) -> dict:
@@ -99,6 +139,19 @@ class MetadataManagerPanel(QWidget):
         load_layout = QVBoxLayout(load_group)
 
         load_layout.addWidget(QLabel("Saved Presets:"))
+
+        sort_row = QHBoxLayout()
+        sort_row.addWidget(QLabel("Sort by:"))
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems(SORT_MODES)
+        self.sort_combo.setToolTip(
+            "Purely cosmetic -- changes how this list is ordered, nothing about the "
+            "underlying presets or their ArUco tag IDs."
+        )
+        self.sort_combo.currentTextChanged.connect(self._on_sort_mode_changed)
+        sort_row.addWidget(self.sort_combo, 1)
+        load_layout.addLayout(sort_row)
+
         self.presets_combo = QComboBox()
         self.presets_combo.setToolTip("Select a saved lens preset.")
         load_layout.addWidget(self.presets_combo)
@@ -113,6 +166,14 @@ class MetadataManagerPanel(QWidget):
         self.delete_button.setToolTip("Permanently deletes the selected preset.")
         self.delete_button.clicked.connect(self._on_delete_preset)
 
+        self.generate_aruco_button = QPushButton("Generate ArUco Tag...")
+        self.generate_aruco_button.setToolTip(
+            "Creates a printable ArUco marker for the selected preset -- scan it as your "
+            "first frame after changing lens or aperture."
+        )
+        self.generate_aruco_button.clicked.connect(self._on_generate_aruco_tag)
+
+        load_button_layout.addWidget(self.generate_aruco_button)
         load_button_layout.addStretch(1) # Add stretch to push buttons to the right
         load_button_layout.addWidget(self.delete_button)
         load_button_layout.addWidget(self.load_button)
@@ -137,8 +198,28 @@ class MetadataManagerPanel(QWidget):
         save_button_layout.addWidget(self.save_button)
         save_layout.addLayout(save_button_layout)
         
+        # --- Import/Export Group ---
+        io_group = QGroupBox("Backup & Sharing")
+        io_layout = QVBoxLayout(io_group)
+        io_layout.addWidget(QLabel("Export all presets to a file, or import presets from one."))
+
+        io_button_layout = QHBoxLayout()
+        self.export_button = QPushButton("Export Presets...")
+        self.export_button.setToolTip("Save all current presets to a .json file you can back up or share.")
+        self.export_button.clicked.connect(self._on_export_presets)
+
+        self.import_button = QPushButton("Import Presets...")
+        self.import_button.setToolTip("Load presets from a previously exported .json file.")
+        self.import_button.clicked.connect(self._on_import_presets)
+
+        io_button_layout.addStretch(1)
+        io_button_layout.addWidget(self.import_button)
+        io_button_layout.addWidget(self.export_button)
+        io_layout.addLayout(io_button_layout)
+        
         layout.addWidget(load_group)
         layout.addWidget(save_group)
+        layout.addWidget(io_group)
         layout.addStretch() # Pushes groups to the top
         self.tab_widget.addTab(self.presets_tab, "Lens Presets")
 
@@ -169,10 +250,38 @@ class MetadataManagerPanel(QWidget):
             QMessageBox.critical(self, "Error", f"Could not save presets file:\n{e}")
 
     def _update_presets_combo(self):
-        """Clears and repopulates the presets dropdown from the in-memory dictionary."""
+        """Clears and repopulates the presets dropdown, ordered by the current sort mode."""
         self.presets_combo.clear()
-        sorted_presets = sorted(self.presets.keys())
-        self.presets_combo.addItems(sorted_presets)
+        self.presets_combo.addItems(self._get_sorted_preset_names())
+
+    def _get_sorted_preset_names(self):
+        """
+        Returns preset names ordered by whatever's selected in the sort
+        dropdown. Purely a display concern -- this never touches preset
+        data, ArucoId assignments, or the underlying JSON file.
+        """
+        mode = self.sort_combo.currentText() if hasattr(self, "sort_combo") else SORT_MODE_NAME
+
+        if mode == SORT_MODE_FOCAL_WIDE_TO_LONG:
+            return sorted(
+                self.presets.keys(),
+                key=lambda name: (_focal_sort_key(self.presets[name].get("FocalLength", ""), descending=False), name)
+            )
+        if mode == SORT_MODE_FOCAL_LONG_TO_WIDE:
+            return sorted(
+                self.presets.keys(),
+                key=lambda name: (_focal_sort_key(self.presets[name].get("FocalLength", ""), descending=True), name)
+            )
+        if mode == SORT_MODE_BRAND:
+            return sorted(
+                self.presets.keys(),
+                key=lambda name: (self.presets[name].get("LensMake", "").lower(), name)
+            )
+        return sorted(self.presets.keys())
+
+    def _on_sort_mode_changed(self, _mode: str):
+        self.settings.setValue("presetSortMode", self.sort_combo.currentText())
+        self._update_presets_combo()
 
     # --- Signal Handlers (Slots) ---
 
@@ -232,6 +341,219 @@ class MetadataManagerPanel(QWidget):
                 self._save_presets_to_file()
                 self._update_presets_combo()
                 QMessageBox.information(self, "Preset Deleted", f"Preset '{preset_name}' has been deleted.")
+
+    def _on_generate_aruco_tag(self):
+        """Generates and previews a printable ArUco tag for the selected saved preset."""
+        preset_name = self.presets_combo.currentText()
+        if not preset_name:
+            QMessageBox.warning(self, "No Preset Selected", "Please select a saved preset to generate a tag for.")
+            return
+
+        preset_data = self.presets.get(preset_name)
+        if not preset_data:
+            return
+
+        # Assigned once and frozen from here on: a physically printed tag has to keep
+        # meaning the same thing indefinitely, so re-generating for the same preset
+        # always returns its existing ID rather than issuing a new one.
+        aruco_id = aruco_codes.get_or_assign_id(preset_data)
+        if preset_data.get("ArucoId") != aruco_id:
+            preset_data["ArucoId"] = aruco_id
+            self.presets[preset_name] = preset_data
+            self._save_presets_to_file()
+
+        try:
+            tag_image = aruco_codes.generate_aruco_tag(preset_name, aruco_id)
+        except Exception as e:
+            QMessageBox.critical(self, "Tag Generation Failed", f"Could not generate an ArUco tag:\n{e}")
+            return
+
+        dialog = ArucoTagPreviewDialog(tag_image, preset_name, aruco_id, self)
+        dialog.exec()
+
+    def _on_export_presets(self):
+        """Exports all current presets to a user-chosen .json file."""
+        if not self.presets:
+            QMessageBox.information(self, "Nothing to Export", "There are no saved presets to export yet.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Presets", "lens_presets_export.json", "JSON Files (*.json)"
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".json"):
+            file_path += ".json"
+
+        try:
+            with open(file_path, 'w') as f:
+                json.dump(self.presets, f, indent=4)
+            QMessageBox.information(self, "Export Complete", f"Exported {len(self.presets)} preset(s) to:\n{file_path}")
+        except IOError as e:
+            QMessageBox.critical(self, "Export Failed", f"Could not write to that file:\n{e}")
+
+    @staticmethod
+    def _is_valid_presets_structure(data) -> bool:
+        """
+        Validates that imported data has the expected shape: a dict mapping
+        preset name (str) -> preset fields (dict). Rejects anything else so
+        a malformed or hand-edited file can't corrupt the preset store or
+        crash the panel later when it expects certain keys/types.
+        """
+        if not isinstance(data, dict):
+            return False
+        for name, preset_data in data.items():
+            if not isinstance(name, str) or not isinstance(preset_data, dict):
+                return False
+        return True
+
+    def _on_import_presets(self):
+        """Imports presets from a user-chosen .json file, with conflict handling."""
+        file_path, _ = QFileDialog.getOpenFileName(self, "Import Presets", "", "JSON Files (*.json)")
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'r') as f:
+                imported_data = json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            QMessageBox.critical(self, "Import Failed", f"Could not read that file as valid JSON:\n{e}")
+            return
+
+        if not self._is_valid_presets_structure(imported_data):
+            QMessageBox.critical(
+                self, "Import Failed",
+                "That file doesn't look like a valid presets export. Expected a JSON object "
+                "mapping preset names to preset fields."
+            )
+            return
+
+        if not imported_data:
+            QMessageBox.information(self, "Nothing to Import", "That file doesn't contain any presets.")
+            return
+
+        conflicts = sorted(set(imported_data.keys()) & set(self.presets.keys()))
+        overwrite_conflicts = True
+
+        if conflicts:
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Preset Conflicts")
+            msg_box.setText(
+                f"{len(conflicts)} preset(s) in this file have the same name as existing presets:\n\n"
+                + ", ".join(conflicts)
+                + "\n\nHow would you like to handle these?"
+            )
+            overwrite_btn = msg_box.addButton("Overwrite", QMessageBox.ButtonRole.AcceptRole)
+            skip_btn = msg_box.addButton("Skip Conflicts", QMessageBox.ButtonRole.ActionRole)
+            cancel_btn = msg_box.addButton("Cancel Import", QMessageBox.ButtonRole.RejectRole)
+            msg_box.exec()
+            clicked = msg_box.clickedButton()
+
+            if clicked == cancel_btn:
+                return
+            overwrite_conflicts = (clicked == overwrite_btn)
+
+        imported_count = 0
+        skipped_count = 0
+        for name, preset_data in imported_data.items():
+            if name in self.presets and not overwrite_conflicts:
+                skipped_count += 1
+                continue
+            self.presets[name] = preset_data
+            imported_count += 1
+
+        self._save_presets_to_file()
+        self._update_presets_combo()
+
+        summary = f"Imported {imported_count} preset(s)."
+        if skipped_count:
+            summary += f" Skipped {skipped_count} conflicting preset(s)."
+        QMessageBox.information(self, "Import Complete", summary)
+
+
+class ArucoTagPreviewDialog(QDialog):
+    """
+    Shows the generated ArUco tag for a preset and lets the user save it as
+    a PNG to print, or copy it to the clipboard. One tag at a time -- no
+    batch/label-sheet printing yet.
+    """
+    # The on-screen preview is scaled to fit within this square; the
+    # full-resolution image is kept separately for saving/copying so print
+    # quality isn't affected by the preview size.
+    PREVIEW_MAX_SIZE = 420
+
+    def __init__(self, tag_image, preset_name: str, aruco_id: int, parent=None):
+        super().__init__(parent)
+        self.tag_image = tag_image
+        self.preset_name = preset_name
+        self.aruco_id = aruco_id
+        self.setWindowTitle(f"ArUco Tag #{aruco_id:03d} - {preset_name}")
+        self.setMinimumSize(360, 420)
+        self.setMaximumSize(1000, 1000)
+        self.resize(480, 560)
+
+        layout = QVBoxLayout(self)
+
+        self._full_pixmap = QPixmap()
+        self._full_pixmap.loadFromData(aruco_codes.marker_image_to_png_bytes(tag_image))
+
+        preview_label = QLabel()
+        preview_label.setPixmap(self._full_pixmap.scaled(
+            self.PREVIEW_MAX_SIZE, self.PREVIEW_MAX_SIZE,
+            Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+        ))
+        preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(preview_label)
+
+        size_label = QLabel(f"ID #{aruco_id:03d}  \u00b7  Full resolution: {tag_image.width}\u00d7{tag_image.height}px")
+        size_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        size_label.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(size_label)
+
+        hint_label = QLabel(
+            "Print this and place it inside your lens cap, or in a notebook. "
+            "Scan it as your first frame after changing lens or aperture. "
+            "This ID is permanently tied to this preset -- deleting the preset "
+            "later won't free the ID for reuse."
+        )
+        hint_label.setWordWrap(True)
+        hint_label.setStyleSheet("color: gray; font-style: italic;")
+        layout.addWidget(hint_label)
+        layout.addStretch(1)
+
+        button_layout = QHBoxLayout()
+        copy_button = QPushButton("Copy to Clipboard")
+        copy_button.clicked.connect(self._on_copy)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        save_button = QPushButton("Save As PNG...")
+        save_button.clicked.connect(self._on_save)
+        button_layout.addWidget(copy_button)
+        button_layout.addStretch(1)
+        button_layout.addWidget(close_button)
+        button_layout.addWidget(save_button)
+        layout.addLayout(button_layout)
+
+    def _on_copy(self):
+        # Copies the full-resolution image, not the scaled-down preview,
+        # so pasting elsewhere doesn't lose print quality.
+        QApplication.clipboard().setPixmap(self._full_pixmap)
+        QMessageBox.information(self, "Copied", "ArUco tag copied to clipboard (full resolution).")
+
+    def _on_save(self):
+        safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in self.preset_name).strip()
+        default_name = f"aruco_{self.aruco_id:03d}_{safe_name or 'lens_preset'}.png"
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save ArUco Tag", default_name, "PNG Images (*.png)")
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".png"):
+            file_path += ".png"
+        try:
+            self.tag_image.save(file_path)
+            QMessageBox.information(self, "Saved", f"ArUco tag saved to:\n{file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Save Failed", f"Could not save the ArUco tag:\n{e}")
+
 
 # --- Standalone Test ---
 # This allows you to run and test this widget by itself.

@@ -1,2 +1,3 @@
 # Ignore ExifTool binary
 /resources/exiftool.exe
+resources/lens_presets.json
