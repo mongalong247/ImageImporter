@@ -18,6 +18,7 @@ from PySide6.QtCore import QObject, Signal, QThread, QSettings
 import exiftool_manager
 import aruco_scan
 import aruco_codes
+import aperture_markers
 from metadata_panel import MetadataManagerPanel
 
 # --- CONSTANTS ---
@@ -134,17 +135,38 @@ class ImportWorker(QObject):
     def _build_preset_segments(self, ordered_paths, base_preset):
         """
         Scans files -- already in chronological (capture-time) order -- for
-        lens-preset ArUco tags, and builds a per-file metadata map: every
-        file gets whichever preset was most recently matched before it, or
-        base_preset if no tag has appeared yet in the batch.
+        lens-preset and aperture-slate ArUco tags, and builds a per-file
+        metadata map: every file gets whichever lens preset was most
+        recently matched before it (or base_preset if none has appeared
+        yet), with FNumber further overridden by whichever aperture slate
+        was most recently matched, if any.
+
+        Both marker families share a single detection call and ID-range
+        branch (101-124 -> aperture_markers' fixed table; everything else
+        -> the dynamic lens-preset registry) rather than forking the
+        detector itself -- see aperture_markers.py for why the ranges
+        can't collide.
+
+        Aperture is deliberately tracked as its own piece of state,
+        separate from the active lens preset:
+          - A lens-preset slate sets the lens baseline AND resets the
+            active aperture back to that lens's own default FNumber
+            (usually its widest stop) -- switching lenses with no
+            aperture slate shot assumes wide open, per lens.
+          - An aperture slate then overrides that default going forward,
+            absolutely (not as a relative +/- stop), until either another
+            aperture slate or another lens slate is encountered.
 
         Unlike the QR approach this replaced, an ArUco tag only carries a
         small integer ID -- the actual lens data lives locally, in
         self.all_presets, keyed by each preset's own ArucoId. That means a
-        detected ID with no matching local preset is a real, distinct
-        failure mode (someone else's tag, a preset that was since deleted,
-        a stale local presets file) and gets its own explicit log line
-        rather than being silently treated the same as "no tag found".
+        detected lens-range ID with no matching local preset is a real,
+        distinct failure mode (someone else's tag, a preset that was
+        since deleted, a stale local presets file) and gets its own
+        explicit log line rather than being silently treated the same as
+        "no tag found". The same goes for a detected aperture-range ID
+        that isn't populated in the table (currently just the reserved
+        ID 124).
 
         base_preset is the Active Metadata tab's fields when "Apply custom
         metadata" is also on, or an empty dict when it's off -- i.e. in
@@ -155,8 +177,9 @@ class ImportWorker(QObject):
 
         Returns (preset_map, slate_frame_paths) where preset_map maps
         file_path -> metadata dict to apply, and slate_frame_paths lists
-        every file that was itself detected as a tag frame (not yet acted
-        on -- that's the "move slate frames" step).
+        every file that was itself detected as a tag frame -- lens or
+        aperture -- (not yet acted on -- that's the "move slate frames"
+        step).
         """
         id_to_preset = {}
         id_to_name = {}
@@ -168,7 +191,8 @@ class ImportWorker(QObject):
 
         preset_map = {}
         slate_frame_paths = []
-        active_preset = base_preset
+        active_lens = dict(base_preset)
+        active_fnumber = active_lens.get("FNumber", "")
 
         for file_path in ordered_paths:
             if not self.is_running:
@@ -184,7 +208,7 @@ class ImportWorker(QObject):
 
             if frame is None:
                 self._log(f"No scannable image available for {filename} ({frame_info}) -- treated as no tag.")
-                preset_map[file_path] = active_preset
+                preset_map[file_path] = {**active_lens, "FNumber": active_fnumber}
                 continue
 
             try:
@@ -194,25 +218,42 @@ class ImportWorker(QObject):
                 self._log(f"Warning: ArUco decode failed for {filename}: {e}")
 
             if aruco_id is not None:
-                matched_preset = id_to_preset.get(aruco_id)
-                if matched_preset is not None:
-                    active_preset = matched_preset
-                    slate_frame_paths.append(file_path)
-                    self._log(
-                        f"Detected ArUco tag #{aruco_id:03d} in {filename} ({frame_info}) "
-                        f"-- switching to preset '{id_to_name[aruco_id]}'."
-                    )
+                if aperture_markers.is_aperture_id(aruco_id):
+                    f_stop = aperture_markers.get_aperture_fnumber(aruco_id)
+                    if f_stop is not None:
+                        active_fnumber = f_stop
+                        slate_frame_paths.append(file_path)
+                        self._log(
+                            f"Detected aperture tag #{aruco_id:03d} in {filename} ({frame_info}) "
+                            f"-- switching to f/{f_stop}."
+                        )
+                    else:
+                        self.had_issues = True
+                        self._log(
+                            f"Warning: Aperture tag #{aruco_id:03d} detected in {filename} ({frame_info}), "
+                            "but that ID is reserved and has no assigned f-stop -- ignored."
+                        )
                 else:
-                    self.had_issues = True
-                    self._log(
-                        f"Warning: ArUco tag #{aruco_id:03d} detected in {filename} ({frame_info}), "
-                        "but no local preset has that ID -- check for a stale presets file or a "
-                        "tag printed on a different machine."
-                    )
+                    matched_preset = id_to_preset.get(aruco_id)
+                    if matched_preset is not None:
+                        active_lens = matched_preset
+                        active_fnumber = active_lens.get("FNumber", "")
+                        slate_frame_paths.append(file_path)
+                        self._log(
+                            f"Detected ArUco tag #{aruco_id:03d} in {filename} ({frame_info}) "
+                            f"-- switching to preset '{id_to_name[aruco_id]}'."
+                        )
+                    else:
+                        self.had_issues = True
+                        self._log(
+                            f"Warning: ArUco tag #{aruco_id:03d} detected in {filename} ({frame_info}), "
+                            "but no local preset has that ID -- check for a stale presets file or a "
+                            "tag printed on a different machine."
+                        )
             else:
                 self._log(f"No ArUco tag found in {filename} ({frame_info}).")
 
-            preset_map[file_path] = active_preset
+            preset_map[file_path] = {**active_lens, "FNumber": active_fnumber}
 
         return preset_map, slate_frame_paths
 
@@ -349,15 +390,15 @@ class ImportWorker(QObject):
                     summary += f" {renamed} renamed to avoid overwriting existing files."
                 if slate_frame_paths:
                     if self.move_slate_frames:
-                        summary += f" {len(slate_frame_paths)} ArUco lens-slate frame(s) detected and moved into 'slates' subfolders."
+                        summary += f" {len(slate_frame_paths)} ArUco slate frame(s) (lens/aperture) detected and moved into 'slates' subfolders."
                     else:
-                        summary += f" {len(slate_frame_paths)} ArUco lens-slate frame(s) detected."
+                        summary += f" {len(slate_frame_paths)} ArUco slate frame(s) (lens/aperture) detected."
                 elif self.autodetect_aruco:
                     # Silent zero-detection is exactly the failure mode that's easy to miss --
                     # say it plainly, and treat it as worth a second look rather than burying
                     # it as just another line in a "successful" run.
                     self.had_issues = True
-                    summary += " 0 ArUco lens-slate frames detected -- no tag-based metadata was applied."
+                    summary += " 0 ArUco slate frames detected -- no tag-based metadata was applied."
                 if failed:
                     summary += f" {failed} failed -- see status messages above for details."
                 self._log(summary)
@@ -500,19 +541,21 @@ class ImageImporter(QMainWindow):
         self.metadata_toggle.toggled.connect(self.metadata_panel.setVisible)
         self.aruco_autodetect_checkbox = QCheckBox("Autodetect scanned ArUco tags")
         self.aruco_autodetect_checkbox.setToolTip(
-            "Scans each file for a lens-preset ArUco tag and tags files from that point "
-            "onward with the matching preset (looked up locally by the tag's ID). If 'Apply "
-            "custom metadata' is also checked, the Active Metadata tab is used as the starting "
-            "preset before the first tag is found; otherwise, files before the first detected "
-            "tag get no metadata written."
+            "Scans each file for a lens-preset or aperture-slate ArUco tag. A lens tag "
+            "switches the active preset (and resets aperture to that lens's default) from "
+            "that point onward; an aperture tag overrides just the FNumber, forward until the "
+            "next aperture or lens tag. If 'Apply custom metadata' is also checked, the Active "
+            "Metadata tab is used as the starting preset before the first tag is found; "
+            "otherwise, files before the first detected tag get no metadata written."
         )
         self.open_dest_checkbox = QCheckBox("Open destination folder after import")
         self.open_dest_checkbox.setToolTip("If checked, the primary destination folder will open automatically when the import finishes.")
         self.move_slates_checkbox = QCheckBox("Move detected slate frames into a 'slates' subfolder")
         self.move_slates_checkbox.setToolTip(
-            "If checked, any frame where a lens-preset ArUco tag was detected is filed into a "
-            "'slates' subfolder (inside each date folder) instead of alongside your regular photos. "
-            "Off by default -- slate frames are imported like any other photo unless you enable this."
+            "If checked, any frame where a lens-preset or aperture-slate ArUco tag was detected "
+            "is filed into a 'slates' subfolder (inside each date folder) instead of alongside "
+            "your regular photos. Off by default -- slate frames are imported like any other "
+            "photo unless you enable this."
         )
         self.import_button = QPushButton("Start Import")
         self.import_button.setStyleSheet("font-weight: bold; padding: 8px;")

@@ -41,6 +41,15 @@ PRESET_FIELDS = (
 
 REGISTRY_PATH = os.path.join(paths.RESOURCES_DIR, "aruco_registry.json")
 
+# Lens presets draw from 1-99. 100 and 125-150 are a deliberate gap around
+# the aperture-slate range (101-124, see aperture_markers.py) so the two
+# ranges can never collide, even via an off-by-one bug. If 1-99 is ever
+# exhausted, assignment resumes at LENS_ID_RESTART rather than colliding
+# with the aperture range.
+LENS_ID_MIN = 1
+LENS_ID_MAX = 99
+LENS_ID_RESTART = 151
+
 
 def _load_registry() -> dict:
     if os.path.exists(REGISTRY_PATH):
@@ -49,13 +58,33 @@ def _load_registry() -> dict:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
             pass
-    return {"next_id": 1}
+    return {"next_id": LENS_ID_MIN}
 
 
 def _save_registry(registry: dict):
     os.makedirs(paths.RESOURCES_DIR, exist_ok=True)
     with open(REGISTRY_PATH, 'w') as f:
         json.dump(registry, f, indent=4)
+
+
+def _advance_id(next_id: int):
+    """
+    Given the registry's raw next_id counter, returns (id_to_assign,
+    counter_value_to_store_after_assigning).
+
+    Under normal operation next_id just climbs 1, 2, 3... within the 1-99
+    lens range. The only special case is the moment the counter first
+    crosses 99: it jumps straight to LENS_ID_RESTART (151), skipping over
+    the reserved 100-150 block entirely, and continues climbing from there
+    indefinitely.
+    """
+    if LENS_ID_MIN <= next_id <= LENS_ID_MAX:
+        assign = next_id
+    elif next_id < LENS_ID_RESTART:
+        assign = LENS_ID_RESTART
+    else:
+        assign = next_id
+    return assign, assign + 1
 
 
 def get_or_assign_id(preset_data: dict) -> int:
@@ -78,8 +107,8 @@ def get_or_assign_id(preset_data: dict) -> int:
         return existing
 
     registry = _load_registry()
-    new_id = registry["next_id"]
-    registry["next_id"] = new_id + 1
+    new_id, next_counter_value = _advance_id(registry["next_id"])
+    registry["next_id"] = next_counter_value
     _save_registry(registry)
     return new_id
 
