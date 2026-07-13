@@ -142,7 +142,7 @@ class ImportWorker(QObject):
         was most recently matched, if any.
 
         Both marker families share a single detection call and ID-range
-        branch (101-124 -> aperture_markers' fixed table; everything else
+        branch (101-130 -> aperture_markers' fixed table; everything else
         -> the dynamic lens-preset registry) rather than forking the
         detector itself -- see aperture_markers.py for why the ranges
         can't collide.
@@ -165,8 +165,8 @@ class ImportWorker(QObject):
         since deleted, a stale local presets file) and gets its own
         explicit log line rather than being silently treated the same as
         "no tag found". The same goes for a detected aperture-range ID
-        that isn't populated in the table (currently just the reserved
-        ID 124).
+        that isn't populated in the table (currently the spare/reserved
+        IDs 123-130).
 
         base_preset is the Active Metadata tab's fields when "Apply custom
         metadata" is also on, or an empty dict when it's off -- i.e. in

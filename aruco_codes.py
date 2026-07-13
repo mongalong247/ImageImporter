@@ -41,8 +41,8 @@ PRESET_FIELDS = (
 
 REGISTRY_PATH = os.path.join(paths.RESOURCES_DIR, "aruco_registry.json")
 
-# Lens presets draw from 1-99. 100 and 125-150 are a deliberate gap around
-# the aperture-slate range (101-124, see aperture_markers.py) so the two
+# Lens presets draw from 1-99. 100 and 131-150 are a deliberate gap around
+# the aperture-slate range (101-130, see aperture_markers.py) so the two
 # ranges can never collide, even via an off-by-one bug. If 1-99 is ever
 # exhausted, assignment resumes at LENS_ID_RESTART rather than colliding
 # with the aperture range.
