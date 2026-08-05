@@ -1,0 +1,170 @@
+name: Build release packages
+
+# Builds portable, self-contained ImageImporter archives for Windows, macOS,
+# and Linux, natively on each platform's own runner (PyInstaller does not
+# cross-compile -- a Windows .exe can only be produced on a Windows machine,
+# etc.). See packaging/README.md for the full rationale and how to test a
+# single platform's build locally.
+#
+# Triggers:
+#   - Push a tag like "v1.4.0" -> builds all 3 platforms and attaches the
+#     zipped archives to a new (or existing) GitHub Release for that tag.
+#   - Manual "Run workflow" from the Actions tab -> builds all 3 platforms
+#     and uploads them as workflow artifacts only (no release is created),
+#     useful for testing packaging changes before cutting a real tag.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string to embed (e.g. 1.4.0). Defaults to 0.0.0-dev for manual runs."
+        required: false
+        default: "0.0.0-dev"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform_name: windows
+            archive_ext: zip
+          - os: macos-latest
+            platform_name: macos
+            archive_ext: zip
+          - os: ubuntu-latest
+            platform_name: linux
+            archive_ext: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version string
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${{ github.event.inputs.version }}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # --- Linux build-time Qt libs -----------------------------------
+      # PySide6 needs these loadable even just to be *imported* while
+      # PyInstaller analyzes it (not only to run the finished app) --
+      # ubuntu-latest runners don't have them by default.
+      - name: Install Linux Qt build dependencies
+        if: matrix.platform_name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libopengl0 libxkbcommon0 libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
+            libxcb-xfixes0 libdbus-1-3 libfontconfig1 libnss3
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-build.txt
+
+      # --- Windows-only: fetch the pinned ExifTool binary --------------
+      # resources/exiftool.exe is gitignored (see .gitignore) -- it isn't
+      # committed to the repo, so a fresh checkout never has it. Fetch the
+      # exact version pinned in exiftool_manager.py's PINNED_BUNDLED_VERSION
+      # constant so what ships matches what the app's status text claims.
+      # If ExifTool releases a new version and the constant gets bumped,
+      # update EXIFTOOL_VERSION below to match in the same commit.
+      - name: Fetch bundled ExifTool (Windows)
+        if: matrix.platform_name == 'windows'
+        shell: pwsh
+        env:
+          EXIFTOOL_VERSION: "13.59"
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "https://sourceforge.net/projects/exiftool/files/exiftool-$env:EXIFTOOL_VERSION`_64.zip/download"
+          Invoke-WebRequest -Uri $url -OutFile exiftool.zip -UserAgent "Mozilla/5.0"
+          Expand-Archive -Path exiftool.zip -DestinationPath exiftool_extracted
+          New-Item -ItemType Directory -Force -Path resources | Out-Null
+          $inner = Get-ChildItem -Path exiftool_extracted -Directory | Select-Object -First 1
+          $sourceDir = if ($inner) { $inner.FullName } else { "exiftool_extracted" }
+          Copy-Item -Path (Join-Path $sourceDir "exiftool(-k).exe") -Destination "resources\exiftool.exe" -Force
+          Copy-Item -Path (Join-Path $sourceDir "exiftool_files") -Destination "resources\exiftool_files" -Recurse -Force
+          # Sanity check: fail the build loudly rather than shipping a
+          # silently-broken/missing bundled ExifTool.
+          & "resources\exiftool.exe" -ver
+
+      # --- macOS-only: build a .icns from the existing .ico ------------
+      - name: Generate macOS app icon
+        if: matrix.platform_name == 'macos'
+        run: |
+          set -e
+          mkdir -p AppIcon.iconset
+          # sips can read .ico directly on macOS.
+          for size in 16 32 128 256 512; do
+            sips -z $size $size assets/app_icon.ico --out "AppIcon.iconset/icon_${size}x${size}.png" > /dev/null
+            double=$((size * 2))
+            sips -z $double $double assets/app_icon.ico --out "AppIcon.iconset/icon_${size}x${size}@2x.png" > /dev/null
+          done
+          iconutil -c icns AppIcon.iconset -o assets/app_icon.icns
+
+      - name: Build with PyInstaller
+        shell: bash
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: pyinstaller packaging/ImageImporter.spec --noconfirm --clean
+
+      - name: Place resources/ next to the executable
+        run: python packaging/copy_resources.py
+
+      # --- Package into the final archive -------------------------------
+      - name: Create archive (Windows)
+        if: matrix.platform_name == 'windows'
+        shell: pwsh
+        run: |
+          $name = "ImageImporter-${{ steps.version.outputs.version }}-windows"
+          Rename-Item -Path "dist\ImageImporter" -NewName $name
+          Compress-Archive -Path "dist\$name" -DestinationPath "dist\$name.zip"
+
+      - name: Create archive (macOS)
+        if: matrix.platform_name == 'macos'
+        run: |
+          NAME="ImageImporter-${{ steps.version.outputs.version }}-macos"
+          cd dist
+          ditto -c -k --keepParent "ImageImporter.app" "$NAME.zip"
+
+      - name: Create archive (Linux)
+        if: matrix.platform_name == 'linux'
+        run: |
+          NAME="ImageImporter-${{ steps.version.outputs.version }}-linux"
+          cd dist
+          mv ImageImporter "$NAME"
+          tar czf "$NAME.tar.gz" "$NAME"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ImageImporter-${{ steps.version.outputs.version }}-${{ matrix.platform_name }}
+          path: dist/ImageImporter-${{ steps.version.outputs.version }}-${{ matrix.platform_name }}.${{ matrix.archive_ext }}
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ImageImporter-${{ steps.version.outputs.version }}-${{ matrix.platform_name }}.${{ matrix.archive_ext }}
+          draft: true
+          generate_release_notes: true
