@@ -24,7 +24,7 @@ import aperture_markers
 from metadata_panel import MetadataManagerPanel
 
 # --- CONSTANTS ---
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.3.0"
 # Light-theme defaults -- overwritten by _resolve_status_styles() once a
 # QApplication exists and its actual palette can be inspected (module load
 # time is too early: no palette to check yet). Kept as plain module globals
