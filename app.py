@@ -95,6 +95,32 @@ def open_folder(path):
         print(f"Failed to open folder {path}: {e}")
 
 
+def find_image_files(folder):
+    """Recursively collect every recognized image/RAW file under `folder`.
+
+    Cards and camera-formatted drives virtually always nest images inside a
+    subfolder (DCIM/100CANON, etc.) rather than at the root, so a plain
+    os.listdir() of the selected folder alone finds nothing. Walk the whole
+    tree instead. Results are sorted for a stable, predictable file order
+    (os.walk's own order isn't guaranteed across platforms/filesystems).
+
+    Raises FileNotFoundError if `folder` doesn't exist -- os.walk() itself
+    stays silent on a missing root (yields nothing rather than raising), so
+    that check is done explicitly to keep the existing "source folder not
+    found" error dialog working (a card that's been ejected mid-selection,
+    a stale remembered path, etc.).
+    """
+    if not os.path.isdir(folder):
+        raise FileNotFoundError(folder)
+    matches = []
+    for dirpath, _dirnames, filenames in os.walk(folder):
+        for name in filenames:
+            if name.lower().endswith(IMAGE_EXTENSIONS):
+                matches.append(os.path.join(dirpath, name))
+    matches.sort()
+    return matches
+
+
 # Result of scanning a single file for an ArUco tag (see _scan_file_for_tag
 # below). Kept as a plain module-level function + namedtuple (rather than
 # an ImportWorker method) so it can be handed straight to a
@@ -350,11 +376,7 @@ class ImportWorker(QObject):
 
     def run(self):
         try:
-            image_paths = self.source_files or [
-                os.path.join(self.source_folder, f)
-                for f in os.listdir(self.source_folder)
-                if f.lower().endswith(IMAGE_EXTENSIONS)
-            ]
+            image_paths = self.source_files or find_image_files(self.source_folder)
             total_files = len(image_paths)
             if total_files == 0:
                 self._log("No compatible image files found to import.")
@@ -792,7 +814,7 @@ class ImageImporter(QMainWindow):
     def start_import(self):
         if not self._validate_paths(): return
         try:
-            file_count = len(self.selected_files) if self.selected_files else len([f for f in os.listdir(self.source_folder) if f.lower().endswith(IMAGE_EXTENSIONS)])
+            file_count = len(self.selected_files) if self.selected_files else len(find_image_files(self.source_folder))
         except FileNotFoundError:
              QMessageBox.critical(self, "Error", f"Source folder not found: {self.source_folder}")
              return
