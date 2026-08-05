@@ -111,16 +111,20 @@ workflow produces.
 ## macOS app icon
 
 `assets/app_icon.ico` is the only icon checked into the repo. The release
-workflow converts it to `.icns` on the macOS runner using `sips` +
-`iconutil` (both preinstalled on macOS, no extra dependency) before the
-PyInstaller build. If you want a purpose-made macOS icon instead of an
-auto-converted one later, drop `assets/app_icon.icns` into the repo and the
-spec file will use it directly (it only auto-generates when the file is
-absent... actually: the spec just looks for `assets/app_icon.icns` — the
-generation step in the workflow always (re)creates it, so committing your
-own would currently get overwritten by CI. If you'd rather hand-author the
-`.icns`, remove the "Generate macOS app icon" step from
-`.github/workflows/release.yml` and commit `assets/app_icon.icns` instead.)
+workflow converts it to `.icns` on the macOS runner via
+`packaging/make_macos_icon.py` (Pillow for the image resizing, `iconutil`
+for the final `.icns` build) before the PyInstaller build. An earlier
+version of this step used macOS's `sips` directly, but `sips` has
+inconsistent support for reading multi-resolution `.ico` files across
+macOS versions and failed outright on this project's first real CI run
+("Unable to write image ... Error 13") — Pillow (already a project
+dependency) is more predictable.
+
+The spec file just looks for `assets/app_icon.icns` — the generation step
+in the workflow always (re)creates it, so if you want a purpose-made macOS
+icon instead of an auto-converted one, remove the "Generate macOS app
+icon" step from `.github/workflows/release.yml` and commit
+`assets/app_icon.icns` directly instead (otherwise CI will overwrite it).
 
 ## A note on where user data lands
 

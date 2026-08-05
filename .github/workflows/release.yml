@@ -89,6 +89,11 @@ jobs:
       # constant so what ships matches what the app's status text claims.
       # If ExifTool releases a new version and the constant gets bumped,
       # update EXIFTOOL_VERSION below to match in the same commit.
+      #
+      # Uses curl.exe (built into windows-latest runners) rather than
+      # Invoke-WebRequest -- the latter is flaky against SourceForge's
+      # mirror-selection redirect chain and failed outright in this
+      # workflow's first real run.
       - name: Fetch bundled ExifTool (Windows)
         if: matrix.platform_name == 'windows'
         shell: pwsh
@@ -96,10 +101,18 @@ jobs:
           EXIFTOOL_VERSION: "13.59"
         run: |
           $ErrorActionPreference = "Stop"
-          $url = "https://sourceforge.net/projects/exiftool/files/exiftool-$env:EXIFTOOL_VERSION`_64.zip/download"
-          Invoke-WebRequest -Uri $url -OutFile exiftool.zip -UserAgent "Mozilla/5.0"
+          $url = "https://sourceforge.net/projects/exiftool/files/exiftool-${env:EXIFTOOL_VERSION}_64.zip/download"
+          Write-Host "Downloading $url"
+          curl.exe -L -f --retry 4 --retry-delay 5 --retry-connrefused `
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" `
+            -o exiftool.zip $url
+          if ($LASTEXITCODE -ne 0) {
+            throw "curl.exe failed to download ExifTool (exit $LASTEXITCODE) from $url"
+          }
           Expand-Archive -Path exiftool.zip -DestinationPath exiftool_extracted
           New-Item -ItemType Directory -Force -Path resources | Out-Null
+          # The Windows zip is normally flat (no top-level folder), but
+          # fall back to root if a nested folder shows up in some release.
           $inner = Get-ChildItem -Path exiftool_extracted -Directory | Select-Object -First 1
           $sourceDir = if ($inner) { $inner.FullName } else { "exiftool_extracted" }
           Copy-Item -Path (Join-Path $sourceDir "exiftool(-k).exe") -Destination "resources\exiftool.exe" -Force
@@ -109,18 +122,11 @@ jobs:
           & "resources\exiftool.exe" -ver
 
       # --- macOS-only: build a .icns from the existing .ico ------------
+      # See packaging/make_macos_icon.py -- uses Pillow (already a project
+      # dependency) rather than `sips`, which has flaky .ico read support.
       - name: Generate macOS app icon
         if: matrix.platform_name == 'macos'
-        run: |
-          set -e
-          mkdir -p AppIcon.iconset
-          # sips can read .ico directly on macOS.
-          for size in 16 32 128 256 512; do
-            sips -z $size $size assets/app_icon.ico --out "AppIcon.iconset/icon_${size}x${size}.png" > /dev/null
-            double=$((size * 2))
-            sips -z $double $double assets/app_icon.ico --out "AppIcon.iconset/icon_${size}x${size}@2x.png" > /dev/null
-          done
-          iconutil -c icns AppIcon.iconset -o assets/app_icon.icns
+        run: python packaging/make_macos_icon.py
 
       - name: Build with PyInstaller
         shell: bash
