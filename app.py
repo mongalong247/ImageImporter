@@ -4,6 +4,8 @@ import shutil
 import json
 import platform
 import subprocess
+from collections import namedtuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QLabel, QPushButton, QFileDialog, QComboBox, QHBoxLayout,
@@ -37,6 +39,17 @@ IMAGE_EXTENSIONS = (
     '.orf', '.raf', '.pef', '.srw', '.rwl', '.3fr', '.raw',
 )
 IMAGE_FILE_DIALOG_FILTER = "Images (" + " ".join(f"*{ext}" for ext in IMAGE_EXTENSIONS) + ")"
+
+# Frame extraction (RAW-preview-via-ExifTool, or direct JPEG decode) and
+# ArUco marker detection are independent per file, so the scan pass in
+# ImportWorker._build_preset_segments() runs them across a small thread
+# pool instead of doing one file fully at a time. Kept modest rather than
+# scaling with cpu_count() alone: RAW preview extraction calls are
+# ultimately serialized through exiftool_manager's process pool anyway
+# (see exiftool_manager.POOL_SIZE), so the win here is mostly in
+# overlapping that I/O wait with other files' OpenCV decode/detect work
+# and direct-JPEG files' fully independent decode, not raw CPU parallelism.
+ARUCO_SCAN_WORKERS = min(8, (os.cpu_count() or 4) + 2)
 
 # --- UTILITY FUNCTIONS ---
 
@@ -80,6 +93,54 @@ def open_folder(path):
             subprocess.run(command, check=True, **subprocess_args)
     except Exception as e:
         print(f"Failed to open folder {path}: {e}")
+
+
+# Result of scanning a single file for an ArUco tag (see _scan_file_for_tag
+# below). Kept as a plain module-level function + namedtuple (rather than
+# an ImportWorker method) so it can be handed straight to a
+# ThreadPoolExecutor without any dependency on worker/instance state --
+# frame extraction and marker decoding for one file never depends on any
+# other file's result.
+_ScanResult = namedtuple(
+    "_ScanResult", ["frame_present", "frame_info", "aruco_id", "extraction_error", "decode_error"]
+)
+
+
+def _scan_file_for_tag(file_path: str) -> "_ScanResult":
+    """
+    Extracts a scannable frame from file_path (RAW preview via ExifTool, or
+    a direct JPEG/PNG/TIFF decode) and decodes any ArUco marker ID from it.
+    Never raises -- any failure is captured in the returned _ScanResult so
+    a single file's extraction/decode problem can't take down the whole
+    parallel scan pass or its ThreadPoolExecutor.
+    """
+    try:
+        frame, frame_info = aruco_scan.get_scannable_frame_with_info(file_path)
+    except Exception as e:
+        return _ScanResult(
+            frame_present=False, frame_info=f"extraction error: {e}",
+            aruco_id=None, extraction_error=str(e), decode_error=None,
+        )
+
+    if frame is None:
+        return _ScanResult(
+            frame_present=False, frame_info=frame_info,
+            aruco_id=None, extraction_error=None, decode_error=None,
+        )
+
+    try:
+        aruco_id = aruco_scan.decode_aruco_id(frame)
+    except Exception as e:
+        return _ScanResult(
+            frame_present=True, frame_info=frame_info,
+            aruco_id=None, extraction_error=None, decode_error=str(e),
+        )
+
+    return _ScanResult(
+        frame_present=True, frame_info=frame_info,
+        aruco_id=aruco_id, extraction_error=None, decode_error=None,
+    )
+
 
 # --- BACKGROUND WORKER ---
 class ImportWorker(QObject):
@@ -180,6 +241,18 @@ class ImportWorker(QObject):
         every file that was itself detected as a tag frame -- lens or
         aperture -- (not yet acted on -- that's the "move slate frames"
         step).
+
+        This runs in two phases. Phase 1 (parallel) extracts a scannable
+        frame and decodes any ArUco ID for every file -- the slow part
+        (RAW-preview extraction via ExifTool, JPEG decode, marker
+        detection) -- across a small thread pool, since every file's
+        extraction/decode is independent of every other file's. Phase 2
+        (sequential) then walks those precomputed results in chronological
+        order, applying the lens/aperture "which preset is active right
+        now" state machine -- which preset applies to file N depends on
+        what was detected in files before it, so that part can't itself be
+        parallelized, but it's cheap (dict lookups and logging) now that
+        the expensive work is already done.
         """
         id_to_preset = {}
         id_to_name = {}
@@ -194,28 +267,46 @@ class ImportWorker(QObject):
         active_lens = dict(base_preset)
         active_fnumber = active_lens.get("FNumber", "")
 
-        for file_path in ordered_paths:
+        # --- Phase 1: parallel frame extraction + ArUco decode ---
+        total = len(ordered_paths)
+        scan_results = [None] * total
+        if total:
+            self._log(f"Scanning {total} file(s) for ArUco tags...")
+        with ThreadPoolExecutor(max_workers=ARUCO_SCAN_WORKERS) as pool:
+            futures = {pool.submit(_scan_file_for_tag, fp): idx for idx, fp in enumerate(ordered_paths)}
+            completed = 0
+            for future in as_completed(futures):
+                idx = futures[future]
+                scan_results[idx] = future.result()
+                completed += 1
+                # A lightweight progress heartbeat -- the detailed, ordered
+                # per-file log lines are emitted below in phase 2, once
+                # results are walked in chronological order, so this just
+                # keeps the status bar from going silent for the whole
+                # scan on a large batch.
+                if completed == total or completed % 10 == 0:
+                    self._log(f"Scanning for ArUco tags: {completed}/{total} file(s) processed...")
+
+        # --- Phase 2: sequential segmentation over the precomputed results ---
+        for file_path, result in zip(ordered_paths, scan_results):
             if not self.is_running:
                 break
 
             filename = os.path.basename(file_path)
+            frame_info = result.frame_info
 
-            try:
-                frame, frame_info = aruco_scan.get_scannable_frame_with_info(file_path)
-            except Exception as e:
-                frame, frame_info = None, f"extraction error: {e}"
-                self._log(f"Warning: Could not extract a scannable image from {filename}: {e}")
+            if result.extraction_error is not None:
+                self._log(f"Warning: Could not extract a scannable image from {filename}: {result.extraction_error}")
 
-            if frame is None:
+            if not result.frame_present:
                 self._log(f"No scannable image available for {filename} ({frame_info}) -- treated as no tag.")
                 preset_map[file_path] = {**active_lens, "FNumber": active_fnumber}
                 continue
 
-            try:
-                aruco_id = aruco_scan.decode_aruco_id(frame)
-            except Exception as e:
-                aruco_id = None
-                self._log(f"Warning: ArUco decode failed for {filename}: {e}")
+            if result.decode_error is not None:
+                self._log(f"Warning: ArUco decode failed for {filename}: {result.decode_error}")
+
+            aruco_id = result.aruco_id
 
             if aruco_id is not None:
                 if aperture_markers.is_aperture_id(aruco_id):
@@ -275,8 +366,11 @@ class ImportWorker(QObject):
             # Computed once up front and reused both for chronological
             # ordering/ArUco segmentation below and for shot-date subfolder
             # naming in the main loop, instead of asking ExifTool for the
-            # same file's date twice.
-            shot_dates = {file_path: exiftool_manager.get_shot_date(file_path) for file_path in image_paths}
+            # same file's date twice. get_shot_dates_batch() resolves the
+            # whole batch in a handful of ExifTool commands (run across a
+            # small process pool) instead of one process launch per file.
+            self._log(f"Reading shot dates for {total_files} file(s)...")
+            shot_dates = exiftool_manager.get_shot_dates_batch(image_paths)
 
             ordered_paths = image_paths
             preset_map = {}
@@ -827,6 +921,10 @@ class ImageImporter(QMainWindow):
         if self.import_thread:
             self.import_thread.quit()
             self.import_thread.wait()
+        # Shuts down any persistent ExifTool process(es) started during
+        # this session (see exiftool_manager.py) so none are left running
+        # as orphans after the app closes.
+        exiftool_manager.close_session()
         event.accept()
 
 # --- APPLICATION ENTRY POINT ---
