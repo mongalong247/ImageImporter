@@ -289,7 +289,14 @@ class MetadataManagerPanel(QWidget):
         """Handles the 'Load' button click."""
         preset_name = self.presets_combo.currentText()
         if not preset_name:
-            QMessageBox.warning(self, "No Preset Selected", "Please select a preset from the list to load.")
+            if not self.presets:
+                QMessageBox.information(
+                    self, "No Presets Yet",
+                    "You don't have any saved presets yet. Fill out the 'Active Metadata' tab and "
+                    "use 'Save Active Metadata' to create your first one."
+                )
+            else:
+                QMessageBox.warning(self, "No Preset Selected", "Please select a preset from the list to load.")
             return
 
         preset_data = self.presets.get(preset_name)
@@ -330,7 +337,10 @@ class MetadataManagerPanel(QWidget):
         """Handles the 'Delete' button click."""
         preset_name = self.presets_combo.currentText()
         if not preset_name:
-            QMessageBox.warning(self, "No Preset Selected", "Please select a preset from the list to delete.")
+            if not self.presets:
+                QMessageBox.information(self, "No Presets Yet", "You don't have any saved presets yet, so there's nothing to delete.")
+            else:
+                QMessageBox.warning(self, "No Preset Selected", "Please select a preset from the list to delete.")
             return
 
         reply = QMessageBox.question(self, "Confirm Deletion", f"Are you sure you want to permanently delete the preset '{preset_name}'?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
@@ -346,7 +356,14 @@ class MetadataManagerPanel(QWidget):
         """Generates and previews a printable ArUco tag for the selected saved preset."""
         preset_name = self.presets_combo.currentText()
         if not preset_name:
-            QMessageBox.warning(self, "No Preset Selected", "Please select a saved preset to generate a tag for.")
+            if not self.presets:
+                QMessageBox.information(
+                    self, "No Presets Yet",
+                    "You don't have any saved presets yet. Fill out the 'Active Metadata' tab and "
+                    "use 'Save Active Metadata' to create one, then come back here to generate its tag."
+                )
+            else:
+                QMessageBox.warning(self, "No Preset Selected", "Please select a saved preset to generate a tag for.")
             return
 
         preset_data = self.presets.get(preset_name)

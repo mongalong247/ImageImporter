@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QDialog, QScrollArea
 )
 # New: Import QIcon for setting the application icon
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtGui import QAction, QIcon, QPalette
 from PySide6.QtCore import QObject, Signal, QThread, QSettings
 
 # --- Modular Imports ---
@@ -25,10 +25,53 @@ from metadata_panel import MetadataManagerPanel
 
 # --- CONSTANTS ---
 APP_VERSION = "1.1.0"
+# Light-theme defaults -- overwritten by _resolve_status_styles() once a
+# QApplication exists and its actual palette can be inspected (module load
+# time is too early: no palette to check yet). Kept as plain module globals
+# rather than a class/dict since every label in this file already refers to
+# them directly by name.
 NORMAL_STYLE = "color: gray; font-style: italic;"
 ERROR_STYLE = "color: #d32f2f; font-weight: bold;"
 WARNING_STYLE = "color: #b26a00; font-weight: bold;"
 OK_STYLE = "color: #2e7d32;"
+
+
+def _is_dark_theme() -> bool:
+    """
+    Heuristic dark-theme detection: dark if the application's window
+    background is darker than mid-gray. Cheap, and good enough for picking
+    readable status-label colors without hardcoding to one specific OS
+    theme -- the alternative (leaving the original light-theme colors as
+    the only option) was flagged in the UX audit as unverified on a dark
+    background, since this environment has no display to check it on.
+    """
+    app = QApplication.instance()
+    if app is None:
+        return False
+    color = app.palette().color(QPalette.ColorRole.Window)
+    brightness = (color.red() * 299 + color.green() * 587 + color.blue() * 114) / 1000
+    return brightness < 128
+
+
+def _resolve_status_styles():
+    """
+    Picks light- or dark-appropriate variants of the four status colors
+    used throughout the form (idle/gray, error/red, warning/amber,
+    ok/green), based on the real application palette. Must be called after
+    QApplication exists (see __main__) and before any widget applies one
+    of these constants as a stylesheet.
+    """
+    global NORMAL_STYLE, ERROR_STYLE, WARNING_STYLE, OK_STYLE
+    if _is_dark_theme():
+        NORMAL_STYLE = "color: #b0b0b0; font-style: italic;"
+        ERROR_STYLE = "color: #ff6b6b; font-weight: bold;"
+        WARNING_STYLE = "color: #ffb74d; font-weight: bold;"
+        OK_STYLE = "color: #66bb6a;"
+    else:
+        NORMAL_STYLE = "color: gray; font-style: italic;"
+        ERROR_STYLE = "color: #d32f2f; font-weight: bold;"
+        WARNING_STYLE = "color: #b26a00; font-weight: bold;"
+        OK_STYLE = "color: #2e7d32;"
 
 # Single shared list of recognized image/RAW extensions, used everywhere a
 # file needs to be checked or filtered instead of three separately
@@ -173,6 +216,14 @@ class ImportWorker(QObject):
     progress = Signal(int)
     status = Signal(str)
     finished = Signal()
+    # Emitted every time a new warning/error is flagged during the run, with
+    # the running total so far -- lets the UI show a live count instead of
+    # only surfacing problems in the final summary/log.
+    warning_count_changed = Signal(int)
+    # True to switch the progress bar to busy/indeterminate mode (used
+    # during the ArUco scan phase, whose duration isn't predictable up
+    # front), False to switch it back to a normal 0-100 percentage bar.
+    progress_mode = Signal(bool)
 
     def __init__(self, source_folder, source_files, dest_folder, backup_folder, structure, date_format,
                  metadata, apply_metadata=False, autodetect_aruco=False, move_slate_frames=False, all_presets=None):
@@ -191,12 +242,24 @@ class ImportWorker(QObject):
         self.is_running = True
         self.log_lines = []   # full timestamped log of this run, for optional saving
         self.had_issues = False  # True if any file failed or a warning occurred
+        self.warning_count = 0  # running total of flagged issues, mirrors had_issues but with a count
 
     def _log(self, message: str):
         """Records a timestamped line to the in-memory log and updates the status label."""
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_lines.append(f"[{timestamp}] {message}")
         self.status.emit(message)
+
+    def _flag_issue(self):
+        """
+        Marks this run as having hit at least one warning/error, and bumps
+        a live running count so the UI can show "N warning(s) so far"
+        instead of only finding out at the very end. Call this everywhere
+        self.had_issues used to be set directly.
+        """
+        self.had_issues = True
+        self.warning_count += 1
+        self.warning_count_changed.emit(self.warning_count)
 
     def stop(self):
         self.is_running = False
@@ -345,7 +408,7 @@ class ImportWorker(QObject):
                             f"-- switching to f/{f_stop}."
                         )
                     else:
-                        self.had_issues = True
+                        self._flag_issue()
                         self._log(
                             f"Warning: Aperture tag #{aruco_id:03d} detected in {filename} ({frame_info}), "
                             "but that ID is reserved and has no assigned f-stop -- ignored."
@@ -361,7 +424,7 @@ class ImportWorker(QObject):
                             f"-- switching to preset '{id_to_name[aruco_id]}'."
                         )
                     else:
-                        self.had_issues = True
+                        self._flag_issue()
                         self._log(
                             f"Warning: ArUco tag #{aruco_id:03d} detected in {filename} ({frame_info}), "
                             "but no local preset has that ID -- check for a stale presets file or a "
@@ -413,7 +476,17 @@ class ImportWorker(QObject):
                 # back to whatever's sitting in the Active Metadata tab
                 # regardless of whether that checkbox is actually checked.
                 base_preset = self.metadata if self.apply_metadata else {}
-                preset_map, slate_frame_paths = self._build_preset_segments(ordered_paths, base_preset)
+                # The scan phase's duration isn't predictable up front (it
+                # depends on RAW preview extraction/decode speed per file),
+                # so the progress bar switches to busy/indeterminate mode
+                # rather than sitting frozen at 0% while status text alone
+                # updates -- then back to a normal percentage bar for the
+                # copy loop below, whose length *is* known (total_files).
+                self.progress_mode.emit(True)
+                try:
+                    preset_map, slate_frame_paths = self._build_preset_segments(ordered_paths, base_preset)
+                finally:
+                    self.progress_mode.emit(False)
             elif self.apply_metadata:
                 # Old, tag-independent behavior: one preset, blanket-applied
                 # to the whole batch, in whatever order files were given.
@@ -475,14 +548,14 @@ class ImportWorker(QObject):
                                 + ", ".join(f"{k}={v}" for k, v in applied_fields.items())
                             )
                             if not exiftool_manager.write_metadata(final_dest_path, active_metadata):
-                                self.had_issues = True
+                                self._flag_issue()
                                 self._log(f"Warning: Metadata write failed for {filename}")
                         elif self.apply_metadata:
                             # Apply custom metadata is on, so every file is expected to get at
                             # least the base preset -- an empty result here means the Active
                             # Metadata tab itself has nothing in it, which is a misconfiguration
                             # worth flagging rather than a normal outcome.
-                            self.had_issues = True
+                            self._flag_issue()
                             self._log(f"Warning: No metadata fields to write for {filename} -- the active preset is empty.")
                         else:
                             # Autodetect-only mode (apply_metadata off): no ArUco tag has been
@@ -495,7 +568,7 @@ class ImportWorker(QObject):
                     # disk full for that write, etc.) must not abort the rest
                     # of the batch -- log it and keep going.
                     failed += 1
-                    self.had_issues = True
+                    self._flag_issue()
                     self._log(f"Error importing '{filename}': {e} -- skipping and continuing.")
 
                 self.progress.emit(int((idx + 1) / total_files * 100))
@@ -513,13 +586,13 @@ class ImportWorker(QObject):
                     # Silent zero-detection is exactly the failure mode that's easy to miss --
                     # say it plainly, and treat it as worth a second look rather than burying
                     # it as just another line in a "successful" run.
-                    self.had_issues = True
+                    self._flag_issue()
                     summary += " 0 ArUco slate frames detected -- no tag-based metadata was applied."
                 if failed:
                     summary += f" {failed} failed -- see status messages above for details."
                 self._log(summary)
         except Exception as e:
-            self.had_issues = True
+            self._flag_issue()
             self._log(f"Import process failed: {e}")
         finally:
             self.finished.emit()
@@ -621,25 +694,30 @@ class ImageImporter(QMainWindow):
         self.import_form_group = QGroupBox("Import Settings")
         self.import_layout = QVBoxLayout()
         self.import_form_group.setLayout(self.import_layout)
-        source_group_label = QLabel("1. Choose Source:")
-        self.select_files_button = QPushButton("Select Files...")
+        # "*" marks the two fields that are actually required to start an
+        # import -- previously the only indication was the label turning red
+        # after a failed attempt to start.
+        source_group_label = QLabel("1. Choose Source: *")
+        self.select_files_button = QPushButton("Select &Files...")
         self.select_files_button.clicked.connect(self.select_source_files)
-        self.select_folder_button = QPushButton("Select Folder...")
+        self.select_folder_button = QPushButton("Select Fold&er...")
         self.select_folder_button.clicked.connect(self.select_source_folder)
         source_button_layout = QHBoxLayout()
         source_button_layout.addWidget(self.select_files_button)
         source_button_layout.addWidget(self.select_folder_button)
         self.source_path_label = QLabel("No source selected")
         self.source_path_label.setStyleSheet(NORMAL_STYLE)
-        dest_label = QLabel("2. Choose Destinations:")
-        self.dest_button = QPushButton("Primary Destination...")
+        dest_label = QLabel("2. Choose Destinations: *")
+        self.dest_button = QPushButton("&Primary Destination...")
         self.dest_button.clicked.connect(self.select_destination)
         self.dest_path_label = QLabel("No destination selected")
         self.dest_path_label.setStyleSheet(NORMAL_STYLE)
-        self.backup_button = QPushButton("Backup Destination... (Optional)")
+        self.backup_button = QPushButton("&Backup Destination... (Optional)")
         self.backup_button.clicked.connect(self.select_backup)
         self.backup_path_label = QLabel("No backup folder selected")
         self.backup_path_label.setStyleSheet(NORMAL_STYLE)
+        required_hint_label = QLabel("* Required")
+        required_hint_label.setStyleSheet(NORMAL_STYLE)
         date_format_label = QLabel("Folder Date Format:")
         self.date_format_combo = QComboBox()
         self.date_format_combo.setEditable(True)
@@ -654,7 +732,13 @@ class ImageImporter(QMainWindow):
             "Applies the Active Metadata tab's fields to every imported file. "
             "Independent of ArUco autodetection below -- use either, both, or neither."
         )
-        self.metadata_toggle.toggled.connect(self.metadata_panel.setVisible)
+        # Not wired directly to metadata_panel.setVisible() -- panel
+        # visibility also needs to respond to the "Manage Presets..." menu
+        # item (see _create_menu_bar/_on_manage_presets), and toggling it
+        # should resize the window to fit rather than leaving the panel to
+        # fight the scroll area for space. _on_metadata_toggle_changed()
+        # covers both.
+        self.metadata_toggle.toggled.connect(self._on_metadata_toggle_changed)
         self.aruco_autodetect_checkbox = QCheckBox("Autodetect scanned ArUco tags")
         self.aruco_autodetect_checkbox.setToolTip(
             "Scans each file for a lens-preset or aperture-slate ArUco tag. A lens tag "
@@ -673,20 +757,31 @@ class ImageImporter(QMainWindow):
             "your regular photos. Off by default -- slate frames are imported like any other "
             "photo unless you enable this."
         )
-        self.import_button = QPushButton("Start Import")
+        self.import_button = QPushButton("&Start Import")
         self.import_button.setStyleSheet("font-weight: bold; padding: 8px;")
         self.import_button.clicked.connect(self.start_import)
-        self.close_button = QPushButton("Close Application")
-        self.close_button.setStyleSheet("padding: 8px;")
-        self.close_button.clicked.connect(self.close)
-        self.close_button.setVisible(False)
-        self.view_log_button = QPushButton("View Import Log...")
+        # Replaces the old "Close Application" button, which just duplicated
+        # the window's own title-bar close control once a run finished --
+        # one less redundant control on screen. Shown only while a run is
+        # in progress (the previous state had *no* visible button at all
+        # during a run -- no cancel, nothing), wired to the worker's
+        # existing stop() so cancellation is safe to call mid-batch.
+        self.cancel_button = QPushButton("&Cancel Import")
+        self.cancel_button.setStyleSheet("padding: 8px;")
+        self.cancel_button.clicked.connect(self._on_cancel_import)
+        self.cancel_button.setVisible(False)
+        self.view_log_button = QPushButton("&View Import Log...")
         self.view_log_button.clicked.connect(self._on_view_log)
         self.view_log_button.setVisible(False)
         self.last_import_log = []
         self.progress = QProgressBar()
         self.status_label = QLabel("Idle. Select source and destination to begin.")
         self.status_label.setWordWrap(True)
+        # Live count of warnings/errors flagged so far during a run --
+        # previously the only feedback was the final "had issues" prompt
+        # once everything was already done.
+        self.warning_count_label = QLabel("")
+        self.warning_count_label.setWordWrap(True)
         self.import_layout.addWidget(source_group_label)
         self.import_layout.addLayout(source_button_layout)
         self.import_layout.addWidget(self.source_path_label)
@@ -696,6 +791,7 @@ class ImageImporter(QMainWindow):
         self.import_layout.addWidget(self.dest_path_label)
         self.import_layout.addWidget(self.backup_button)
         self.import_layout.addWidget(self.backup_path_label)
+        self.import_layout.addWidget(required_hint_label)
         self.import_layout.addSpacing(20)
         self.import_layout.addWidget(self.structure_label)
         self.import_layout.addWidget(self.structure_dropdown)
@@ -713,12 +809,29 @@ class ImageImporter(QMainWindow):
         self.import_layout.addStretch()
         self.import_layout.addWidget(self.import_button)
         self.import_layout.addWidget(self.view_log_button)
-        self.import_layout.addWidget(self.close_button)
+        self.import_layout.addWidget(self.cancel_button)
         self.import_layout.addWidget(self.status_label)
+        self.import_layout.addWidget(self.warning_count_label)
         self.import_layout.addWidget(self.progress)
 
     def _create_menu_bar(self):
         menu_bar = self.menuBar()
+
+        # Previously the only way to reach the presets panel (view saved
+        # presets, generate/print ArUco tags) was to check "Apply custom
+        # metadata" -- an unrelated checkbox whose real job is blanket-
+        # applying the Active Metadata tab to every imported file. This
+        # menu item shows the same panel directly, regardless of that
+        # checkbox's state, so preset management doesn't require opting
+        # into (and remembering to opt back out of) blanket-apply.
+        # Checkable so it also doubles as the "hide it again" control when
+        # the panel was opened this way rather than via the checkbox --
+        # the two sources are independent and the panel stays visible as
+        # long as either one is "on" (see _update_metadata_panel_visibility).
+        presets_menu = menu_bar.addMenu("&Presets")
+        self.manage_presets_action = QAction("Show &Presets Panel", self, checkable=True)
+        self.manage_presets_action.toggled.connect(self._on_manage_presets_toggled)
+        presets_menu.addAction(self.manage_presets_action)
 
         settings_menu = menu_bar.addMenu("&Settings")
         exiftool_path_action = QAction("Set &ExifTool Path...", self)
@@ -736,6 +849,61 @@ class ImageImporter(QMainWindow):
     def _show_about_dialog(self):
         # (This function is unchanged)
         QMessageBox.about(self, "About Photo Import & Tagger", f"<b>Photo Import & Tagger</b><p>Version: {APP_VERSION}</p><p>A utility for importing photos with reliable backups and powerful, preset-driven metadata tagging.</p><p>This tool helps photographers using manual lenses to embed critical EXIF data directly into their workflow.</p>")
+
+    # --- Metadata panel visibility ---
+    #
+    # The metadata panel (Lens Presets + Active Metadata tabs) has two
+    # independent reasons to be visible: the 'Apply custom metadata'
+    # checkbox (whose actual job is blanket-applying the Active Metadata
+    # tab to every imported file) and the 'Presets > Show Presets Panel'
+    # menu toggle (for reaching preset management/ArUco tag generation
+    # without needing to opt into blanket-apply). The panel is shown
+    # whenever *either* source is "on", and only hidden once *both* are
+    # off -- so switching one off doesn't yank the panel out from under
+    # someone who opened it for the other reason. There's only ever one
+    # panel instance (never a second one in a dialog), so its Active
+    # Metadata field values can't ever drift out of sync with themselves.
+
+    def _on_metadata_toggle_changed(self, _checked):
+        """Handles the 'Apply custom metadata' checkbox."""
+        self._update_metadata_panel_visibility()
+
+    def _on_manage_presets_toggled(self, checked):
+        """Handles the 'Presets > Show Presets Panel' menu toggle."""
+        if checked:
+            self.metadata_panel.tab_widget.setCurrentIndex(0)  # Lens Presets tab
+        self._update_metadata_panel_visibility()
+
+    def _update_metadata_panel_visibility(self):
+        visible = self.metadata_toggle.isChecked() or self.manage_presets_action.isChecked()
+        self.metadata_panel.setVisible(visible)
+        self._resize_for_metadata_panel()
+
+    def _resize_for_metadata_panel(self):
+        """
+        The metadata panel sits beside the import form in a horizontal
+        layout inside a QScrollArea, so showing/hiding it doesn't resize
+        the window on its own -- previously that meant a manually-widened
+        window was needed to see both panels at once, or a horizontal
+        scrollbar appeared instead. Grow/shrink the window to fit instead,
+        clamped to the available screen so it can never demand more room
+        than the monitor actually has.
+        """
+        self.import_form_group.updateGeometry()
+        self.metadata_panel.updateGeometry()
+        target_width = self.import_form_group.sizeHint().width()
+        if self.metadata_panel.isVisible():
+            target_width += self.metadata_panel.sizeHint().width()
+        target_width += 40  # breathing room for layout margins/scrollbar
+        target_height = max(self.height(), self.minimumHeight())
+
+        screen = self.screen() if hasattr(self, "screen") else None
+        if screen is not None:
+            available = screen.availableGeometry()
+            target_width = min(target_width, available.width() - 40)
+            target_height = min(target_height, available.height() - 40)
+
+        self.resize(target_width, target_height)
 
     # --- ExifTool status & configuration ---
 
@@ -811,6 +979,40 @@ class ImageImporter(QMainWindow):
             self.dest_path_label.setStyleSheet(ERROR_STYLE)
             is_valid = False
         return is_valid
+
+    def _warn_if_destination_nested_in_source(self) -> bool:
+        """
+        Folder-mode source scanning is now recursive (see find_image_files()),
+        so a destination or backup folder that's the same as, or nested
+        inside, the source folder would get swept back up as "new" source
+        files on a later import from the same place -- e.g. re-importing
+        from a staging folder that already contains a previous run's dated
+        output subfolder. Only relevant in folder-select mode; an explicit
+        file selection doesn't re-walk the source tree. Warns and lets the
+        user proceed anyway rather than blocking outright. Returns True to
+        proceed, False if the user backs out.
+        """
+        if self.selected_files or not self.source_folder:
+            return True
+        source_norm = os.path.normpath(os.path.abspath(self.source_folder))
+        nested = []
+        for label, folder in (("primary destination", self.dest_folder), ("backup destination", self.backup_folder)):
+            if not folder:
+                continue
+            folder_norm = os.path.normpath(os.path.abspath(folder))
+            if folder_norm == source_norm or folder_norm.startswith(source_norm + os.sep):
+                nested.append(label)
+        if not nested:
+            return True
+        reply = QMessageBox.warning(
+            self, "Destination Inside Source Folder",
+            "Your " + " and ".join(nested) + " folder is the same as, or inside, your source folder.\n\n"
+            "Since folder selection scans subfolders too, a later import from this same source could "
+            "pick up these newly-imported files again as new input.\n\nProceed anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
     def start_import(self):
         if not self._validate_paths(): return
         try:
@@ -821,7 +1023,13 @@ class ImageImporter(QMainWindow):
         if file_count == 0:
             QMessageBox.information(self, "No Files Found", "The selected source contains no compatible image files.")
             return
-        source_text = f"{file_count} file(s)" if self.selected_files else f"Folder: {truncate_path(self.source_folder)}"
+        if not self._warn_if_destination_nested_in_source():
+            self.status_label.setText("Import cancelled by user.")
+            return
+        source_text = (
+            f"{file_count} file(s)" if self.selected_files
+            else f"Folder: {truncate_path(self.source_folder)} ({file_count} file(s) found)"
+        )
         dest_text = truncate_path(self.dest_folder)
         backup_text = truncate_path(self.backup_folder) if self.backup_folder else "None"
         msg = (f"You are about to import:\n\nSource: {source_text}\nPrimary Destination: {dest_text}\nBackup Destination: {backup_text}\n\nProceed?")
@@ -830,8 +1038,12 @@ class ImageImporter(QMainWindow):
             self.status_label.setText("Import cancelled by user.")
             return
         self.import_button.setVisible(False)
-        self.close_button.setVisible(False)
+        self.view_log_button.setVisible(False)
+        self.cancel_button.setVisible(True)
+        self.cancel_button.setEnabled(True)
+        self.progress.setRange(0, 100)
         self.progress.setValue(0)
+        self.warning_count_label.setText("")
         user_format = self.date_format_combo.currentText()
         python_format = user_format.replace("YYYY", "%Y").replace("MM", "%m").replace("DD", "%d")
         current_metadata = self.metadata_panel.get_active_metadata()
@@ -845,9 +1057,31 @@ class ImageImporter(QMainWindow):
         self.import_worker.moveToThread(self.import_thread)
         self.import_thread.started.connect(self.import_worker.run)
         self.import_worker.progress.connect(self.progress.setValue)
+        self.import_worker.progress_mode.connect(self._set_progress_indeterminate)
         self.import_worker.status.connect(self.status_label.setText)
+        self.import_worker.warning_count_changed.connect(self._on_warning_count_changed)
         self.import_worker.finished.connect(self.on_import_finished)
         self.import_thread.start()
+
+    def _on_cancel_import(self):
+        """Stops the running import at its next checkpoint (see ImportWorker.is_running)."""
+        if self.import_worker:
+            self.import_worker.stop()
+        self.cancel_button.setEnabled(False)
+        self.status_label.setText("Cancelling -- finishing current file...")
+
+    def _set_progress_indeterminate(self, indeterminate: bool):
+        """Slot for ImportWorker.progress_mode -- see that signal's docstring."""
+        if indeterminate:
+            self.progress.setRange(0, 0)
+        else:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
+
+    def _on_warning_count_changed(self, count: int):
+        self.warning_count_label.setText(f"{count} warning(s) so far" if count else "")
+        self.warning_count_label.setStyleSheet(WARNING_STYLE)
+
     def on_import_finished(self):
         # Capture what we need from the worker before we let go of it below.
         had_issues = bool(self.import_worker and self.import_worker.had_issues)
@@ -859,7 +1093,8 @@ class ImageImporter(QMainWindow):
             self.import_thread.wait()
         self.import_thread = None
         self.import_worker = None
-        self.close_button.setVisible(True)
+        self.progress.setRange(0, 100)
+        self.cancel_button.setVisible(False)
         self.import_button.setVisible(True)
         self.view_log_button.setVisible(True)
         self.status_label.setText("Import complete. Ready to close or start another import.")
@@ -908,6 +1143,14 @@ class ImageImporter(QMainWindow):
             QMessageBox.critical(self, "Save Failed", f"Could not save the log file:\n{e}")
 
     def load_settings(self):
+        # Restored before anything else so a saved size/position (from a
+        # previous session, possibly on a different monitor arrangement)
+        # takes effect before the rest of load_settings/exiftool-status
+        # start populating the form. Falls back to the setGeometry() call
+        # in __init__ if nothing's been saved yet (fresh install).
+        saved_geometry = self.settings.value("windowGeometry")
+        if saved_geometry is not None:
+            self.restoreGeometry(saved_geometry)
         self.date_format_combo.setCurrentText(self.settings.value("dateFormat", "YYYY-MM-DD"))
         self.open_dest_checkbox.setChecked(self.settings.value("openDestAfterImport", False, type=bool))
         self.move_slates_checkbox.setChecked(self.settings.value("moveSlateFramesToSubfolder", False, type=bool))
@@ -930,6 +1173,7 @@ class ImageImporter(QMainWindow):
             self.backup_path_label.setText(f"Backup: {truncate_path(last_backup)}")
             self.backup_path_label.setToolTip(last_backup)
     def save_settings(self):
+        self.settings.setValue("windowGeometry", self.saveGeometry())
         self.settings.setValue("dateFormat", self.date_format_combo.currentText())
         self.settings.setValue("openDestAfterImport", self.open_dest_checkbox.isChecked())
         self.settings.setValue("moveSlateFramesToSubfolder", self.move_slates_checkbox.isChecked())
@@ -952,6 +1196,10 @@ class ImageImporter(QMainWindow):
 # --- APPLICATION ENTRY POINT ---
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    # Must happen after QApplication exists (palette isn't queryable before
+    # that) and before ImageImporter() builds any widget that applies one
+    # of the status-color constants as a stylesheet.
+    _resolve_status_styles()
 
     # ExifTool availability is no longer treated as fatal: the app launches
     # either way, and ImageImporter._refresh_exiftool_status() (called from
