@@ -26,3 +26,11 @@ A one-click photo import tool for photographers that:
 - Presets system: 100%
 - Cross-platform support: 75%
 - Final packaging: 100%
+
+## Building & releasing
+
+Portable builds for Windows, macOS, and Linux are produced by
+`.github/workflows/release.yml` — push a version tag (`v1.4.0`) and it
+builds all three natively and attaches them as a draft GitHub Release.
+See [`packaging/README.md`](packaging/README.md) for the full process,
+including how to build locally on a single platform.
