@@ -63,28 +63,42 @@ a missing ExifTool as fatal).
 
 ## Sourcing ExifTool for Windows builds
 
-`resources/exiftool.exe` and `resources/exiftool_files/` are gitignored —
-they're never committed to the repo (see `.gitignore`). The release
-workflow's Windows job downloads the official Windows build directly from
-exiftool.org (mirrored via SourceForge) and drops it into `resources/`
-before running PyInstaller:
+The Windows ExifTool zip is **vendored directly in the repo**, at
+`vendor/exiftool-<VERSION>_64.zip` — it is committed, not gitignored. The
+release workflow's Windows job just unzips it locally into `resources/`
+before running PyInstaller; it does not fetch anything over the network.
 
-```
-https://sourceforge.net/projects/exiftool/files/exiftool-<VERSION>_64.zip/download
-```
+This is deliberate, not a shortcut: SourceForge (where ExifTool's Windows
+build is hosted) returns a flat `403 Forbidden` to GitHub Actions' runner
+IP ranges as anti-abuse policy against cloud/datacenter IPs. This was
+confirmed directly — the workflow hit it with both `Invoke-WebRequest` and
+`curl.exe`, with retries, different user agents, etc. None of that reliably
+works around a deliberate IP-range block, so the network fetch was removed
+from CI entirely.
 
-**The version fetched (`EXIFTOOL_VERSION` in the workflow) must match
-`PINNED_BUNDLED_VERSION` in `exiftool_manager.py`** — the app's own status
-text/UI reports that constant as "what's bundled", so the two need to stay
-in sync. When you bump one, bump the other in the same commit.
+`resources/exiftool.exe` and `resources/exiftool_files/` themselves stay
+gitignored (see `.gitignore`) — they're the *unzipped, build-time-generated*
+copy, not the source. Only the zip in `vendor/` is committed.
 
-To build a Windows package locally, you need to do this step yourself
-first:
+**To update the vendored ExifTool version** (e.g. when ExifTool ships a new
+release and you bump `PINNED_BUNDLED_VERSION` in `exiftool_manager.py` to
+match):
 
-1. Download `exiftool-<version>_64.zip` from https://exiftool.org
-2. Extract it
-3. Copy `exiftool(-k).exe` → `resources/exiftool.exe`
-4. Copy the `exiftool_files/` folder → `resources/exiftool_files/`
+1. On a normal (non-cloud/CI) internet connection, download
+   `exiftool-<version>_64.zip` from https://exiftool.org (links to
+   SourceForge; a home/office connection isn't blocked, only CI/cloud IP
+   ranges are).
+2. Delete the old file in `vendor/` and add the new one, keeping the exact
+   `exiftool-<version>_64.zip` naming.
+3. Update `EXIFTOOL_VERSION` in `.github/workflows/release.yml` to match.
+4. Update `PINNED_BUNDLED_VERSION` in `exiftool_manager.py` to match, if you
+   haven't already.
+5. Commit all three changes together.
+
+**The version in `vendor/`, `EXIFTOOL_VERSION` in the workflow, and
+`PINNED_BUNDLED_VERSION` in `exiftool_manager.py` must always agree** — the
+app's own status text/UI reports the constant as "what's bundled", so a
+mismatch means the app is lying about its own contents.
 
 ## Building locally (one platform at a time)
 
@@ -93,8 +107,9 @@ PyInstaller does not cross-compile — build on the OS you're targeting.
 ```bash
 pip install -r requirements.txt -r requirements-build.txt
 
-# Windows only, first: fetch resources/exiftool.exe + resources/exiftool_files/
-# (see above)
+# Windows only, first: unzip vendor/exiftool-<version>_64.zip into resources/
+# the same way the workflow does (exiftool(-k).exe -> resources/exiftool.exe,
+# exiftool_files/ -> resources/exiftool_files/)
 
 pyinstaller packaging/ImageImporter.spec --noconfirm --clean
 python packaging/copy_resources.py

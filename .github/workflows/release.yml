@@ -88,28 +88,29 @@ jobs:
       # exact version pinned in exiftool_manager.py's PINNED_BUNDLED_VERSION
       # constant so what ships matches what the app's status text claims.
       # If ExifTool releases a new version and the constant gets bumped,
-      # update EXIFTOOL_VERSION below to match in the same commit.
+      # update EXIFTOOL_VERSION below (and re-vendor the zip -- see
+      # packaging/README.md) in the same commit.
       #
-      # Uses curl.exe (built into windows-latest runners) rather than
-      # Invoke-WebRequest -- the latter is flaky against SourceForge's
-      # mirror-selection redirect chain and failed outright in this
-      # workflow's first real run.
-      - name: Fetch bundled ExifTool (Windows)
+      # This does NOT download ExifTool over the network -- SourceForge
+      # returns a flat 403 to GitHub Actions' runner IP ranges (confirmed:
+      # this workflow hit it directly, both with Invoke-WebRequest and with
+      # curl.exe). SourceForge blocks/rate-limits cloud & CI datacenter IPs
+      # as anti-abuse policy; that isn't something a smarter retry/UA/mirror
+      # choice reliably works around. Instead the zip is vendored directly
+      # in the repo (downloaded once, by hand, from a normal residential
+      # connection) and just unzipped here.
+      - name: Unpack vendored ExifTool (Windows)
         if: matrix.platform_name == 'windows'
         shell: pwsh
         env:
           EXIFTOOL_VERSION: "13.59"
         run: |
           $ErrorActionPreference = "Stop"
-          $url = "https://sourceforge.net/projects/exiftool/files/exiftool-${env:EXIFTOOL_VERSION}_64.zip/download"
-          Write-Host "Downloading $url"
-          curl.exe -L -f --retry 4 --retry-delay 5 --retry-connrefused `
-            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" `
-            -o exiftool.zip $url
-          if ($LASTEXITCODE -ne 0) {
-            throw "curl.exe failed to download ExifTool (exit $LASTEXITCODE) from $url"
+          $zip = "vendor\exiftool-${env:EXIFTOOL_VERSION}_64.zip"
+          if (-not (Test-Path $zip)) {
+            throw "Vendored ExifTool zip not found at $zip -- see packaging/README.md ('Sourcing ExifTool for Windows builds')."
           }
-          Expand-Archive -Path exiftool.zip -DestinationPath exiftool_extracted
+          Expand-Archive -Path $zip -DestinationPath exiftool_extracted
           New-Item -ItemType Directory -Force -Path resources | Out-Null
           # The Windows zip is normally flat (no top-level folder), but
           # fall back to root if a nested folder shows up in some release.
